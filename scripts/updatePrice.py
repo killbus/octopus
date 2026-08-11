@@ -146,55 +146,66 @@ def generate_entry(model_id: str, cost: dict) -> str:
     return f'\t"{model_id}": {{Input: {input_price}, Output: {output_price}, CacheRead: {cache_read}, CacheWrite: {cache_write}}},'
 
 
-def main():
-    print(f"Fetching price data from {LLM_PRICE_URL}...")
-    raw_price = fetch_price_data()
-    
-    entries = []
-    model_count = 0
-    
+def add_entry(entries: dict[str, str], model_id: str, cost: dict, source: str) -> bool:
+    """Add a normalized model entry, preserving the first price on conflicts."""
+    normalized_id = model_id.lower()
+    if normalized_id in entries:
+        print(f"  Duplicate model '{normalized_id}' from {source}, keeping first price")
+        return False
+
+    entries[normalized_id] = generate_entry(normalized_id, cost)
+    return True
+
+
+def collect_entries(raw_price: dict) -> dict[str, str]:
+    """Collect globally unique model entries, preferring real models over aliases."""
+    entries: dict[str, str] = {}
+    alias_candidates: list[tuple[str, dict, str]] = []
+    provider_counts: dict[str, int] = {}
+
     for provider in PROVIDERS:
         if provider not in raw_price:
             print(f"  Provider '{provider}' not found, skipping...")
             continue
-            
+
         models = raw_price[provider].get("models", {})
-        provider_count = 0
-        
+        provider_counts[provider] = 0
+
         for model_data in models.values():
             model_id = model_data.get("id", "").lower()
             cost = model_data.get("cost", {})
-            
             if not model_id:
                 continue
-            
-            # 添加原始模型
-            entries.append(generate_entry(model_id, cost))
-            provider_count += 1
-            
-            # 收集所有别名
-            aliases = []
-            
-            # 1. Claude 模型自动生成别名
-            aliases.extend(generate_claude_aliases(model_id))
-            
-            # 2. 静态别名映射
-            if model_id in MODEL_ALIASES:
-                aliases.extend(MODEL_ALIASES[model_id])
-            
-            # 添加别名 (去重)
-            for alias in set(aliases):
-                entries.append(generate_entry(alias.lower(), cost))
-                provider_count += 1
-            
-        print(f"  {provider}: {provider_count} models")
-        model_count += provider_count
+
+            if add_entry(entries, model_id, cost, f"provider '{provider}'"):
+                provider_counts[provider] += 1
+
+            aliases = generate_claude_aliases(model_id)
+            aliases.extend(MODEL_ALIASES.get(model_id, []))
+            for alias in sorted({alias.lower() for alias in aliases}):
+                alias_candidates.append((alias, cost, provider))
+
+    # Add aliases only after every real model so an alias can never shadow one.
+    for alias, cost, provider in alias_candidates:
+        if add_entry(entries, alias, cost, f"alias in provider '{provider}'"):
+            provider_counts[provider] += 1
+
+    for provider, count in provider_counts.items():
+        print(f"  {provider}: {count} models")
+
+    return entries
+
+
+def main():
+    print(f"Fetching price data from {LLM_PRICE_URL}...")
+    raw_price = fetch_price_data()
+    entries = collect_entries(raw_price)
     
     # 生成 Go 文件内容
     update_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     content = PRESETS_GO_TEMPLATE.format(
         update_time=update_time,
-        entries="\n".join(entries),
+        entries="\n".join(entries.values()),
     )
     
     # 写入文件
@@ -202,7 +213,7 @@ def main():
     output_path = script_dir.parent / "internal" / "price" / "presets.go"
     
     output_path.write_text(content, encoding="utf-8")
-    print(f"\nGenerated {output_path} with {model_count} models")
+    print(f"\nGenerated {output_path} with {len(entries)} models")
 
 
 if __name__ == "__main__":
