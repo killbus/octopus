@@ -4,7 +4,22 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"time"
+
+	dbmodel "github.com/bestruirui/octopus/internal/model"
 )
+
+func effectiveSameChannelRetries(retryEnabled bool, configured int, mode dbmodel.BaseUrlMode) int {
+	if mode.Normalize() == dbmodel.BaseUrlModeFailover {
+		return 1
+	}
+	if !retryEnabled {
+		return 1
+	}
+	if configured <= 0 {
+		return 3
+	}
+	return configured
+}
 
 // isRetryableStatus 判断 HTTP 状态码是否可重试
 // 429(限流)、503(服务不可用)、>=500(服务端错误)、0(连接错误) 可重试

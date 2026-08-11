@@ -255,6 +255,7 @@ func processWSResponseCreate(
 		log.Debugf("ws relay switching to replay (apikey=%d, request_model=%s, failed_previous_response_id=%s, reset_conversation=%t)",
 			apiKeyID, requestModel, failedPreviousResponseID, result.ResetConversation)
 		balancer.DeleteSticky(apiKeyID, requestModel)
+		clearContinuationAffinity(ctx, req)
 		replayedRequest := conversationState.BuildReplayRequest(originalRequest)
 		replayReq, replayGroup, replayErr := newWSRelayRequest(ctx, conn, inAdapter, apiKeyID, requestModel, replayedRequest, originalRequest, preferredSticky, bodyBytes)
 		if replayErr == nil {
@@ -545,16 +546,7 @@ func runWSRelay(ctx context.Context, req *relayRequest, group *dbmodel.Group) ws
 		var result attemptResult
 		// 同通道重试次数：failover 模式下强制 1（URL 切换本身即重试语义），
 		// per-iteration 覆盖——不能整体改写（否则首个 failover 渠道会污染变量、波及后续渠道）。
-		effectiveMaxRetries := 1
-		if group.RetryEnabled {
-			effectiveMaxRetries = group.MaxRetries
-			if effectiveMaxRetries <= 0 {
-				effectiveMaxRetries = 3
-			}
-		}
-		if channel.BaseUrlMode.Normalize() == dbmodel.BaseUrlModeFailover {
-			effectiveMaxRetries = 1
-		}
+		effectiveMaxRetries := effectiveSameChannelRetries(group.RetryEnabled, group.MaxRetries, channel.BaseUrlMode)
 		for retryNum := 0; retryNum < effectiveMaxRetries; retryNum++ {
 			if retryNum > 0 {
 				delay := computeBackoff(retryNum, result.RetryAfter)
@@ -587,7 +579,8 @@ func runWSRelay(ctx context.Context, req *relayRequest, group *dbmodel.Group) ws
 			}
 		}
 
-		if !result.Success && !result.Written && !result.Canceled && !result.ResetConversation {
+		if !result.Success && !result.Written && !result.Canceled && !result.ResetConversation &&
+			!(result.StopFailover && isTransientUpstreamTransportError(result.Err)) {
 			failureKind := circuitFailureKind(group.RetryEnabled, result.StatusCode)
 			if replayExact && result.StatusCode == http.StatusServiceUnavailable && isNoAvailableAccountError(relayErrorMessage(result.Err)) {
 				failureKind = balancer.FailureHard
@@ -607,6 +600,13 @@ func runWSRelay(ctx context.Context, req *relayRequest, group *dbmodel.Group) ws
 				return wsRelayResult{ResetConversation: publicErr.ResetConversation, Err: result.Err, PublicError: &publicErr}
 			}
 			return wsRelayResult{ResetConversation: true, Err: result.Err}
+		}
+		if result.StopFailover {
+			if publicErr, ok := classifyWSPublicError(result.Err, result.StatusCode); ok {
+				return wsRelayResult{Err: result.Err, PublicError: &publicErr}
+			}
+			publicErr := wsPublicError{Status: http.StatusBadGateway, Code: "upstream_transport_error", Message: "上游连接暂时中断，请稍后重试"}
+			return wsRelayResult{Err: result.Err, PublicError: &publicErr}
 		}
 		if result.Canceled || result.Written {
 			return wsRelayResult{Written: result.Written, Canceled: result.Canceled, Err: result.Err}
@@ -631,10 +631,11 @@ func finalizeWSRelay(ctx context.Context, conn *websocket.Conn, req *relayReques
 	if result.Canceled || result.Written {
 		return result
 	}
+	if result.ResetConversation {
+		balancer.DeleteSticky(req.apiKeyID, req.requestModel)
+		clearContinuationAffinity(ctx, req)
+	}
 	if result.PublicError != nil {
-		if result.PublicError.ResetConversation {
-			balancer.DeleteSticky(req.apiKeyID, req.requestModel)
-		}
 		writeWSError(ctx, conn, result.PublicError.Status, result.PublicError.Code, result.PublicError.Message)
 		return result
 	}

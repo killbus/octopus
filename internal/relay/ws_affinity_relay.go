@@ -56,6 +56,26 @@ func (ra *relayAttempt) applyContinuationAffinity(ctx context.Context) {
 	}
 }
 
+func clearContinuationAffinity(ctx context.Context, req *relayRequest) {
+	if req == nil || req.internalRequest == nil {
+		return
+	}
+	responseID := strings.TrimSpace(currentPreviousResponseID(req.internalRequest))
+	if responseID == "" {
+		return
+	}
+
+	deleteWSResponseConn(responseID)
+	scope := wsAffinityScope{
+		APIKeyID:     req.apiKeyID,
+		GroupID:      req.groupID,
+		RequestModel: req.requestModel,
+		ResponseID:   responseID,
+	}
+	if err := getWSAffinityStore().Delete(ctx, scope); err != nil {
+		log.Debugf("failed to delete invalid ws response affinity (apikey=%d, group=%d, request_model=%s, response_id=%s): %v", req.apiKeyID, req.groupID, req.requestModel, responseID, err)
+	}
+}
 func (ra *relayAttempt) recordSuccessfulWSAffinity(pc *pooledConn) {
 	if ra == nil || ra.metrics == nil || ra.metrics.InternalResponse == nil || pc == nil {
 		return

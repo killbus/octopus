@@ -93,14 +93,6 @@ func HandleResponsesCompact(c *gin.Context) {
 	var lastStatusCode int
 	var lastRetryAfter time.Duration
 
-	maxSameChannelRetries := 1
-	if group.RetryEnabled {
-		maxSameChannelRetries = group.MaxRetries
-		if maxSameChannelRetries <= 0 {
-			maxSameChannelRetries = 3
-		}
-	}
-
 	for iter.Next() {
 		select {
 		case <-c.Request.Context().Done():
@@ -153,8 +145,9 @@ func HandleResponsesCompact(c *gin.Context) {
 		var statusCode int
 		var retryAfter time.Duration
 		var success bool
+		effectiveMaxRetries := effectiveSameChannelRetries(group.RetryEnabled, group.MaxRetries, channel.BaseUrlMode)
 
-		for retryNum := 0; retryNum < maxSameChannelRetries; retryNum++ {
+		for retryNum := 0; retryNum < effectiveMaxRetries; retryNum++ {
 			if retryNum > 0 {
 				delay := computeBackoff(retryNum, retryAfter)
 				select {
@@ -227,9 +220,39 @@ func supportsResponsesCompact(channelType outbound.OutboundType) bool {
 
 func forwardResponsesCompact(c *gin.Context, metrics *RelayMetrics, iter *balancer.Iterator, channel *dbmodel.Channel, usedKey dbmodel.ChannelKey, requestBody []byte) (int, time.Duration, error) {
 	span := iter.StartAttempt(channel.ID, usedKey.ID, channel.Name)
-	request, err := buildResponsesCompactRequest(c.Request.Context(), channel, usedKey.ChannelKey, requestBody)
+	candidates := resolveBaseURLAttemptCandidates(channel)
+	failover := channel.BaseUrlMode.Normalize() == dbmodel.BaseUrlModeFailover
+	var statusCode int
+	var retryAfter time.Duration
+	var attemptErr error
+	for idx, candidate := range candidates {
+		statusCode, retryAfter, attemptErr = forwardResponsesCompactOnce(c, metrics, channel, usedKey, candidate.URL, requestBody)
+		span.SetBaseURLKey(candidate.Key)
+		if attemptErr == nil {
+			if candidate.CanonicalURL != "" {
+				baseURLCooler.recordSuccess(channel.ID, candidate.CanonicalURL)
+			}
+			span.End(dbmodel.AttemptSuccess, statusCode, "")
+			return statusCode, retryAfter, nil
+		}
+		signal := isBaseURLFailoverSignal(c.Request.Context(), statusCode, attemptErr, false, false)
+		if failover && isBaseURLCoolableFailureSignal(c.Request.Context(), statusCode, attemptErr, false, false) && candidate.CanonicalURL != "" {
+			baseURLCooler.recordFailure(channel.ID, candidate.CanonicalURL)
+		}
+		if !failover || idx >= len(candidates)-1 || !signal {
+			break
+		}
+	}
+	if attemptErr == nil {
+		attemptErr = fmt.Errorf("no base URL candidate")
+	}
+	span.End(dbmodel.AttemptFailed, statusCode, attemptErr.Error())
+	return statusCode, retryAfter, attemptErr
+}
+
+func forwardResponsesCompactOnce(c *gin.Context, metrics *RelayMetrics, channel *dbmodel.Channel, usedKey dbmodel.ChannelKey, baseURL string, requestBody []byte) (int, time.Duration, error) {
+	request, err := buildResponsesCompactRequest(c.Request.Context(), channel, usedKey.ChannelKey, baseURL, requestBody)
 	if err != nil {
-		span.End(dbmodel.AttemptFailed, 0, err.Error())
 		return 0, 0, fmt.Errorf("failed to create compact request: %w", err)
 	}
 	metrics.SetTransportRequestPayload(requestBody, metrics.RequestModel)
@@ -237,21 +260,18 @@ func forwardResponsesCompact(c *gin.Context, metrics *RelayMetrics, iter *balanc
 
 	response, err := sendCompactRequest(channel, request)
 	if err != nil {
-		span.End(dbmodel.AttemptFailed, 0, err.Error())
 		return 0, 0, fmt.Errorf("failed to send compact request: %w", err)
 	}
 	defer response.Body.Close()
 
 	body, readErr := io.ReadAll(response.Body)
 	if readErr != nil {
-		span.End(dbmodel.AttemptFailed, response.StatusCode, readErr.Error())
 		return response.StatusCode, 0, fmt.Errorf("failed to read compact response body: %w", readErr)
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		retryAfter := parseRetryAfter(response.Header.Get("Retry-After"))
 		statusCode := normalizeUpstreamStatusCode(response.StatusCode, string(body))
-		span.End(dbmodel.AttemptFailed, statusCode, string(body))
 		return statusCode, retryAfter, fmt.Errorf("upstream error: %d: %s", response.StatusCode, string(body))
 	}
 
@@ -267,20 +287,15 @@ func forwardResponsesCompact(c *gin.Context, metrics *RelayMetrics, iter *balanc
 		metrics.SetInternalResponse(compactResponseToInternalResponse(&compactResp), metrics.RequestModel)
 	}
 
-	span.End(dbmodel.AttemptSuccess, response.StatusCode, "")
 	return response.StatusCode, 0, nil
 }
 
-func buildResponsesCompactRequest(ctx context.Context, channel *dbmodel.Channel, key string, requestBody []byte) (*http.Request, error) {
-	baseURL := resolveSingleBaseURL(channel).URL
-	if baseURL == "" {
-		baseURL = channel.GetBaseUrl()
-	}
-	parsedURL, err := url.Parse(strings.TrimSuffix(baseURL, "/"))
+func buildResponsesCompactRequest(ctx context.Context, channel *dbmodel.Channel, key string, baseURL string, requestBody []byte) (*http.Request, error) {
+	parsedURL, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
-	parsedURL.Path = parsedURL.Path + "/responses/compact"
+	parsedURL.Path = strings.TrimSuffix(parsedURL.Path, "/") + "/responses/compact"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedURL.String(), bytes.NewReader(requestBody))
 	if err != nil {

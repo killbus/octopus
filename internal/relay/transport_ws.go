@@ -66,14 +66,14 @@ func (r *wsUpstreamReader) ReadEvent(ctx context.Context) ([]byte, error) {
 		Type   string `json:"type"`
 		Status int    `json:"status"`
 		Error  *struct {
-			Code    string `json:"code"`
+			Code    any    `json:"code"`
 			Message string `json:"message"`
 			Type    string `json:"type"`
 		} `json:"error"`
 		Response *struct {
 			Status string `json:"status"`
 			Error  *struct {
-				Code    string `json:"code"`
+				Code    any    `json:"code"`
 				Message string `json:"message"`
 				Type    string `json:"type"`
 			} `json:"error"`
@@ -92,17 +92,21 @@ func (r *wsUpstreamReader) ReadEvent(ctx context.Context) ([]byte, error) {
 			} else if r.statusCode < 400 {
 				r.statusCode = http.StatusBadGateway
 			}
-			errCode := ""
-			errMsg := "upstream ws error"
+			upstreamErr := &wsUpstreamEventError{
+				Status:  r.statusCode,
+				Message: "upstream ws error",
+			}
 			if event.Error != nil {
-				errMsg = event.Error.Message
-				errCode = event.Error.Code
+				upstreamErr.Code = normalizeWSUpstreamErrorCode(event.Error.Code)
+				upstreamErr.Type = event.Error.Type
+				upstreamErr.Message = event.Error.Message
 			}
 			if event.Response != nil && event.Response.Error != nil {
-				errMsg = event.Response.Error.Message
-				errCode = event.Response.Error.Code
+				upstreamErr.Code = normalizeWSUpstreamErrorCode(event.Response.Error.Code)
+				upstreamErr.Type = event.Response.Error.Type
+				upstreamErr.Message = event.Response.Error.Message
 			}
-			return nil, fmt.Errorf("%s (code=%s, status=%d)", errMsg, errCode, r.statusCode)
+			return nil, upstreamErr
 		}
 	}
 

@@ -1,10 +1,12 @@
 package relay
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -20,18 +22,27 @@ func randomIntn(n int) int {
 	return rand.Intn(n)
 }
 
-// canonicalBaseURL 规范化 baseUrl 用于池键/指纹：去首尾空白、去尾斜杠、统一 scheme/host 大小写。
-// MVP 明确不做 query 排序规范化：url.Query().Encode() 会二次编码已有 %XX，且对签名类参数排序
-// 会导致不同排序被判同桶、跨签名连接复用。query 全序规范化留作扩展点。
+// canonicalBaseURL 规范化 baseUrl 用于池键/指纹：去首尾空白、仅裁剪 path 尾斜杠、
+// 统一 scheme/host 大小写。RawQuery 整体作为不透明端点身份原字节保留：不解析、不排序、
+// 不筛除，也不根据任何参数名推断业务语义，避免不同端点被错误归入同一连接池桶。
 func canonicalBaseURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
-	trimmed = strings.TrimRight(trimmed, "/")
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return trimmed
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	parsed.Host = strings.ToLower(parsed.Host)
+	escapedPath := parsed.EscapedPath()
+	trimmedPath := strings.TrimRight(escapedPath, "/")
+	if trimmedPath != escapedPath {
+		decodedPath, decodeErr := url.PathUnescape(trimmedPath)
+		if decodeErr != nil {
+			return trimmed
+		}
+		parsed.Path = decodedPath
+		parsed.RawPath = trimmedPath
+	}
 	return parsed.String()
 }
 
@@ -92,9 +103,13 @@ func (c *baseURLFailoverCooler) recordFailure(channelID int, canonicalURL string
 	}
 	state.consecutiveFailures++
 	if state.consecutiveFailures >= baseURLCoolMaxFailures {
-		delay := time.Duration(1<<(state.consecutiveFailures-baseURLCoolMaxFailures)) * baseURLCoolBaseDelay
-		if delay > baseURLCoolMaxDelay {
-			delay = baseURLCoolMaxDelay
+		delay := baseURLCoolBaseDelay
+		for remaining := state.consecutiveFailures - baseURLCoolMaxFailures; remaining > 0 && delay < baseURLCoolMaxDelay; remaining-- {
+			if delay >= baseURLCoolMaxDelay/2 {
+				delay = baseURLCoolMaxDelay
+				break
+			}
+			delay *= 2
 		}
 		state.skipUntil = time.Now().Add(delay)
 	}
@@ -242,4 +257,46 @@ func resolveSingleBaseURL(channel *dbmodel.Channel) baseURLCandidate {
 		return baseURLCandidate{}
 	}
 	return candidates[0]
+}
+
+func resolveBaseURLAttemptCandidates(channel *dbmodel.Channel) []baseURLCandidate {
+	candidates := resolveBaseURLs(channel)
+	if len(candidates) == 0 {
+		if channel == nil {
+			return []baseURLCandidate{{}}
+		}
+		return []baseURLCandidate{candidateFromBaseUrl(channel.ID, dbmodel.BaseUrl{URL: channel.GetBaseUrl()})}
+	}
+	if channel.BaseUrlMode.Normalize() != dbmodel.BaseUrlModeFailover {
+		return candidates[:1]
+	}
+	return candidates
+}
+
+// isBaseURLCoolableFailureSignal excludes operation-specific failures that may
+// justify trying another URL but do not prove this URL is globally unhealthy.
+func isBaseURLCoolableFailureSignal(ctx context.Context, statusCode int, err error, written, continuation bool) bool {
+	if statusCode == http.StatusNotFound {
+		return false
+	}
+	return isBaseURLFailoverSignal(ctx, statusCode, err, written, continuation)
+}
+
+func isBaseURLFailoverSignal(ctx context.Context, statusCode int, err error, written, continuation bool) bool {
+	if err == nil || written || continuation {
+		return false
+	}
+	if isClientCancellation(ctx, err) {
+		return false
+	}
+	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+		return false
+	}
+	if statusCode == http.StatusNotFound {
+		return true
+	}
+	if statusCode >= 400 && statusCode < 500 {
+		return false
+	}
+	return true
 }

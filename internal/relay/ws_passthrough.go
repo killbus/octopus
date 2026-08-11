@@ -82,7 +82,7 @@ func (ra *relayAttempt) forwardViaWSPassthrough(ctx context.Context) (int, error
 				return statusCode, redialErr
 			}
 			if continuation {
-				return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
+				return http.StatusBadGateway, fmt.Errorf("upstream continuation transport temporarily unavailable: %w", err)
 			}
 		}
 		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
@@ -104,8 +104,8 @@ func (ra *relayAttempt) forwardViaWSPassthrough(ctx context.Context) (int, error
 				return statusCode, redialErr
 			}
 		}
-		if continuation && isContinuationTransportFailure(err) {
-			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
+		if continuation && needsConversationRestart(relayErrorMessage(err)) {
+			return http.StatusConflict, err
 		}
 		if ra.requestContext().Err() == nil {
 			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
@@ -128,7 +128,7 @@ func (ra *relayAttempt) retryViaFreshUpstreamWSPassthrough(ctx context.Context, 
 		wsUpstreamPool.RemoveConn(redialed)
 		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		if requiresUpstreamWSContinuation(ra.internalRequest) {
-			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
+			return http.StatusBadGateway, fmt.Errorf("upstream continuation transport temporarily unavailable: %w", err), true
 		}
 		return -1, nil, true
 	}
@@ -142,8 +142,8 @@ func (ra *relayAttempt) retryViaFreshUpstreamWSPassthrough(ctx context.Context, 
 	if err != nil {
 		ra.applyWSPassthroughStats(stats)
 		wsUpstreamPool.RemoveConn(redialed)
-		if requiresUpstreamWSContinuation(ra.internalRequest) && isContinuationTransportFailure(err) {
-			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
+		if requiresUpstreamWSContinuation(ra.internalRequest) && needsConversationRestart(relayErrorMessage(err)) {
+			return http.StatusConflict, err, true
 		}
 		if ra.requestContext().Err() == nil {
 			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
@@ -207,6 +207,9 @@ func (ra *relayAttempt) handleWSPassthroughStream(ctx context.Context, pc *poole
 		}
 		observeWSPassthroughEvent(stats, data)
 		if stats.Error != nil {
+			if firstEvent && isTransientUpstreamTransportError(stats.Error) {
+				return stats, stats.Error
+			}
 			if !dropDownstream {
 				out := ra.rewriteWSPassthroughDownstreamModel(data)
 				if writeErr := writeWSPassthroughDownstream(ctx, writer, out); writeErr != nil {

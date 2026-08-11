@@ -146,7 +146,7 @@ func (ra *relayAttempt) effectiveBaseURL() string {
 	return ""
 }
 
-// channelNameForLog / baseURLForLog 供日志观测使用（URL 维度，design step 12）。
+// channelNameForLog / baseURLKeyForLog 供日志观测使用（URL 维度，design step 12）。
 func (ra *relayAttempt) channelNameForLog() string {
 	if ra == nil || ra.channel == nil {
 		return ""
@@ -154,11 +154,18 @@ func (ra *relayAttempt) channelNameForLog() string {
 	return ra.channel.Name
 }
 
-func (ra *relayAttempt) baseURLForLog() string {
+func (ra *relayAttempt) baseURLKeyForLog() string {
 	if ra == nil {
 		return ""
 	}
-	return ra.effectiveBaseURL()
+	if ra.baseURLKey != "" {
+		return ra.baseURLKey
+	}
+	baseURL := ra.effectiveBaseURL()
+	if baseURL == "" {
+		return ""
+	}
+	return baseURLKey(baseURL)
 }
 
 // attemptResult 封装单次尝试的结果
@@ -167,6 +174,7 @@ type attemptResult struct {
 	Written           bool          // 流式响应是否已开始写入（不可重试）
 	Canceled          bool          // 是否由下游请求取消或超时触发
 	ResetConversation bool          // 是否需要立即重置连续会话并停止后续 failover
+	StopFailover      bool          // 是否保持当前会话路由并停止跨渠道 failover
 	FirstTokenTimeout bool          // 是否由首字超时触发，用于直接切换渠道
 	Err               error         // 失败时的错误
 	StatusCode        int           // 上游 HTTP 状态码（0 = 连接错误）

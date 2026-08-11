@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bestruirui/octopus/internal/relay/stream"
 	transformerModel "github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/utils/log"
 )
@@ -125,18 +124,7 @@ func isUpstreamWSConnectionBroken(err error) bool {
 }
 
 func shouldReconnectUpstreamWSBeforeReplay(err error) bool {
-	// Empty stream before first event should trigger reconnect
-	if errors.Is(err, stream.ErrEmptyUpstreamStream) {
-		log.Debugf("ws continuation error marked reconnectable before replay: %v", err)
-		return true
-	}
-
-	message := relayErrorMessage(err)
-	if message == "" {
-		return false
-	}
-	shouldReconnect := isUpstreamWSConnectionBroken(err) ||
-		strings.Contains(message, "ws stream ended before first event")
+	shouldReconnect := isTransientUpstreamTransportError(err)
 	if shouldReconnect {
 		log.Debugf("ws continuation error marked reconnectable before replay: %v", err)
 	}
@@ -144,8 +132,7 @@ func shouldReconnectUpstreamWSBeforeReplay(err error) bool {
 }
 
 func needsConversationRestart(message string) bool {
-	return strings.Contains(message, "please restart the conversation") ||
-		strings.Contains(message, "continuation connection is unavailable") ||
+	return strings.Contains(message, "conversation_not_found") || strings.Contains(message, "please restart the conversation") ||
 		strings.Contains(message, "no tool call found for function call output with call_id") ||
 		strings.Contains(message, "previous response") && strings.Contains(message, "not found")
 }

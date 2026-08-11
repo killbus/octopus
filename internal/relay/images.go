@@ -130,6 +130,8 @@ func ImagesHandler(endpoint string, c *gin.Context) {
 	defer hb.Stop()
 
 	var lastErr error
+	var lastStatusCode int
+	var lastRetryAfter time.Duration
 
 	for iter.Next() {
 		select {
@@ -179,7 +181,32 @@ func ImagesHandler(endpoint string, c *gin.Context) {
 		span := iter.StartAttempt(channel.ID, usedKey.ID, channel.Name)
 
 		// 尝试一次转发
-		statusCode, written, usage, upstreamCT, fwdErr := imagesAttempt(ctx, endpoint, c, bc, isMultipart, boundary, jsonPayload, stream, channel, usedKey.ChannelKey, group.FirstTokenTimeOut, metrics, item.ModelName, hb)
+		candidates := resolveBaseURLAttemptCandidates(channel)
+		failover := channel.BaseUrlMode.Normalize() == model.BaseUrlModeFailover
+		var statusCode int
+		var written bool
+		var usage *imagesUsage
+		var upstreamCT string
+		var retryAfter time.Duration
+		var fwdErr error
+		for idx, candidate := range candidates {
+			retryAfter = 0
+			statusCode, written, usage, upstreamCT, fwdErr = imagesAttempt(ctx, endpoint, c, bc, isMultipart, boundary, jsonPayload, stream, channel, candidate.URL, usedKey.ChannelKey, group.FirstTokenTimeOut, metrics, item.ModelName, hb, &retryAfter)
+			span.SetBaseURLKey(candidate.Key)
+			if fwdErr == nil {
+				if candidate.CanonicalURL != "" {
+					baseURLCooler.recordSuccess(channel.ID, candidate.CanonicalURL)
+				}
+				break
+			}
+			signal := isBaseURLFailoverSignal(ctx, statusCode, fwdErr, written, false)
+			if failover && isBaseURLCoolableFailureSignal(ctx, statusCode, fwdErr, written, false) && candidate.CanonicalURL != "" {
+				baseURLCooler.recordFailure(channel.ID, candidate.CanonicalURL)
+			}
+			if !failover || idx >= len(candidates)-1 || !signal {
+				break
+			}
+		}
 
 		// 更新 channel key 状态
 		usedKey.StatusCode = statusCode
@@ -232,10 +259,23 @@ func ImagesHandler(endpoint string, c *gin.Context) {
 		}
 
 		lastErr = fmt.Errorf("channel %s failed: %v", channel.Name, fwdErr)
+		lastStatusCode = statusCode
+		lastRetryAfter = retryAfter
 	}
 
 	// 所有通道都失败
 	metrics.SaveWithChannelStats(ctx, false, lastErr, iter.Attempts(), false)
+	if isPassthroughStatus(lastStatusCode) {
+		if lastRetryAfter > 0 {
+			c.Header("Retry-After", fmt.Sprintf("%d", int(lastRetryAfter.Seconds())))
+		}
+		hb.FlushOrError(c, lastStatusCode, "channel failed")
+		return
+	}
+	if lastStatusCode > 0 {
+		hb.FlushOrError(c, lastStatusCode, "channel failed")
+		return
+	}
 	hb.FlushOrError(c, http.StatusBadGateway, "all channels failed")
 }
 
@@ -536,22 +576,20 @@ func imagesAttempt(
 	jsonPayload map[string]any,
 	stream bool,
 	channel *model.Channel,
+	baseURL string,
 	channelKey string,
 	firstTokenTimeOutSec int,
 	metrics *imagesRelayMetrics,
 	actualModel string,
 	hb *earlyHeartbeat,
+	retryAfter *time.Duration,
 ) (statusCode int, written bool, usage *imagesUsage, upstreamCT string, err error) {
 	// 构建 URL（baseUrl.Path 后追加 endpoint）
-	baseURL := resolveSingleBaseURL(channel).URL
-	if baseURL == "" {
-		baseURL = channel.GetBaseUrl()
-	}
-	parsedURL, err := url.Parse(strings.TrimSuffix(baseURL, "/"))
+	parsedURL, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return 0, false, nil, "", fmt.Errorf("failed to parse base url: %w", err)
 	}
-	parsedURL.Path = parsedURL.Path + endpoint
+	parsedURL.Path = strings.TrimSuffix(parsedURL.Path, "/") + endpoint
 
 	var bodyReader io.Reader
 	var contentType string
@@ -617,6 +655,9 @@ func imagesAttempt(
 		return 0, false, nil, "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer respUp.Body.Close()
+	if retryAfter != nil {
+		*retryAfter = parseRetryAfter(respUp.Header.Get("Retry-After"))
+	}
 
 	upstreamCT = respUp.Header.Get("Content-Type")
 

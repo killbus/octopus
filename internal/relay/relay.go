@@ -87,8 +87,10 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 	// 当 HTTP 请求携带 previous_response_id 时，尝试从本地加载上一次成功的 replay 状态，
 	// 优先路由到同一渠道/key，并将请求转为自包含形式（合并历史，移除 previous_response_id）。
 	var responsesReplayState *wsConversationState
+	var requestedPreviousResponseID string
 	if inboundType == inbound.InboundTypeOpenAIResponse && internalRequest.RawAPIFormat == model.APIFormatOpenAIResponse {
-		if prevID := internalRequest.OpenAIPreviousResponseID(); prevID != "" {
+		requestedPreviousResponseID = internalRequest.OpenAIPreviousResponseID()
+		if prevID := requestedPreviousResponseID; prevID != "" {
 			responsesReplayState = resolveResponsesReplayState(apiKeyID, group.ID, requestModel, internalRequest)
 			if responsesReplayState != nil {
 				log.Debugf("loaded HTTP replay state (apikey=%d, group=%d, model=%s, previous_response_id=%s, channel=%d, key=%d)",
@@ -117,6 +119,22 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 		preferredSticky = responsesReplayStateToSticky(responsesReplayState)
 		if preferredSticky != nil {
 			log.Debugf("HTTP replay sticky routing preference (channel=%d, key=%d)", preferredSticky.ChannelID, preferredSticky.ChannelKeyID)
+		}
+	}
+	if preferredSticky == nil && requestedPreviousResponseID != "" && requiresUpstreamWSContinuation(internalRequest) {
+		scope := wsAffinityScope{
+			APIKeyID:     apiKeyID,
+			GroupID:      group.ID,
+			RequestModel: requestModel,
+			ResponseID:   requestedPreviousResponseID,
+		}
+		if entry, ok := getWSAffinityStore().Get(c.Request.Context(), scope); ok {
+			preferredSticky = &balancer.SessionEntry{
+				ChannelID:    entry.ChannelID,
+				ChannelKeyID: entry.ChannelKeyID,
+				Timestamp:    time.Now(),
+			}
+			log.Debugf("HTTP continuation affinity hit (channel=%d, key=%d)", entry.ChannelID, entry.ChannelKeyID)
 		}
 	}
 	iter := balancer.NewIteratorWithPreference(group, apiKeyID, requestModel, preferredSticky)
@@ -244,16 +262,7 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 		// 同通道重试次数：failover 模式下强制 1（URL 切换本身即重试语义），
 		// 且必须 per-iteration 重算——maxSameChannelRetries 是循环外固定变量，
 		// 整体改写会被首个 failover 渠道污染并波及后续非 failover 渠道。
-		effectiveMaxRetries := 1
-		if group.RetryEnabled {
-			effectiveMaxRetries = group.MaxRetries
-			if effectiveMaxRetries <= 0 {
-				effectiveMaxRetries = 3
-			}
-		}
-		if channel.BaseUrlMode.Normalize() == dbmodel.BaseUrlModeFailover {
-			effectiveMaxRetries = 1
-		}
+		effectiveMaxRetries := effectiveSameChannelRetries(group.RetryEnabled, group.MaxRetries, channel.BaseUrlMode)
 
 		// 同通道重试循环
 		var result attemptResult
@@ -291,7 +300,8 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 		}
 
 		// 同通道重试耗尽后记录熔断器失败
-		if !result.Success && !result.Written && !result.Canceled && !result.ResetConversation {
+		if !result.Success && !result.Written && !result.Canceled && !result.ResetConversation &&
+			!(result.StopFailover && isTransientUpstreamTransportError(result.Err)) {
 			failureKind := circuitFailureKind(group.RetryEnabled, result.StatusCode)
 			balancer.RecordFailure(channel.ID, usedKey.ID, internalRequest.Model, failureKind)
 			outlierwindow.Report(channel.ID, false, result.StatusCode, time.Now())
@@ -352,12 +362,23 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 			return
 		}
 		if result.ResetConversation {
+			balancer.DeleteSticky(req.apiKeyID, req.requestModel)
+			clearContinuationAffinity(c.Request.Context(), req)
 			metrics.SaveWithChannelStats(c.Request.Context(), false, result.Err, iter.Attempts(), false)
 			if publicErr, ok := classifyWSPublicError(result.Err, result.StatusCode); ok {
 				hb.FlushOrError(c, publicErr.Status, publicErr.Message)
 			} else {
 				hb.FlushOrError(c, result.StatusCode, result.Err.Error())
 			}
+			return
+		}
+		if result.StopFailover {
+			metrics.SaveWithChannelStats(c.Request.Context(), false, result.Err, iter.Attempts(), false)
+			statusCode := result.StatusCode
+			if statusCode < http.StatusBadRequest {
+				statusCode = http.StatusBadGateway
+			}
+			hb.FlushOrError(c, statusCode, "channel failed")
 			return
 		}
 		if result.Written {
@@ -406,7 +427,7 @@ func (ra *relayAttempt) attempt() attemptResult {
 	// URL 层：解析候选端点。
 	// - continuation 请求在 resolveBaseUrl 层直接应用 affinity 端点（R4，禁 failover）。
 	// - 非 failover 模式取第一个候选（delay=Delay 最小，random/weighted=按权重随机排序后首项）。
-	// - failover 模式逐个尝试候选，失败切下一条（连接错误/5xx），429/503/4xx/已写/continuation 立即停。
+	// - failover 模式逐个尝试候选，失败切下一条（连接错误/5xx/404），429/503/其他 4xx/已写/continuation 立即停。
 	statusCode, fwdErr := ra.forwardWithBaseURLFailover(span)
 	span.SetBaseURLKey(ra.baseURLKey)
 
@@ -474,12 +495,21 @@ func (ra *relayAttempt) attempt() attemptResult {
 		ra.collectResponse()
 	}
 	firstTokenTimeout := isFirstTokenTimeout(nil, fwdErr)
+	continuation := requiresUpstreamWSContinuation(ra.internalRequest)
+	// A transport-classified continuation failure is retryable regardless of an
+	// inconsistent status carried by the upstream event. Keep the routing tuple
+	// pinned, retry it as a gateway failure, and return 502 only after exhaustion.
+	if continuation && isTransientUpstreamTransportError(fwdErr) {
+		statusCode = http.StatusBadGateway
+	}
+	resetConversation := continuation && statusCode == http.StatusConflict && needsConversationRestart(relayErrorMessage(fwdErr))
 	return attemptResult{
 		Success:           false,
 		Written:           written,
-		ResetConversation: statusCode == http.StatusConflict && needsConversationRestart(relayErrorMessage(fwdErr)),
+		ResetConversation: resetConversation,
+		StopFailover:      continuation,
 		FirstTokenTimeout: firstTokenTimeout,
-		Err:               fmt.Errorf("channel %s failed: %v", ra.channel.Name, fwdErr),
+		Err:               fmt.Errorf("channel %s failed: %w", ra.channel.Name, fwdErr),
 		StatusCode:        statusCode,
 		RetryAfter:        ra.retryAfter,
 	}
@@ -518,8 +548,8 @@ func (ra *relayAttempt) forwardWithBaseURLFailover(span *balancer.AttemptSpan) (
 		if fwdErr == nil {
 			return statusCode, nil
 		}
-		// 冷却表记录：仅 failover 信号（连接错误/5xx/首 token 超时）才记录端点失败，
-		// 429/503/4xx/客户端取消/continuation 不记。最后一条候选同样记录，
+		// 冷却表记录：仅端点不可用信号（连接错误/5xx/首 token 超时）才记录失败，
+		// 429/503/其他 4xx/客户端取消/continuation 不记。最后一条候选同样记录，
 		// 使"全部 URL 冷却中时 fail-open 全试"（R7）可经正常失败路径触达。
 		if cand.CanonicalURL != "" && ra.isURLCoolableFailure(statusCode, fwdErr) {
 			baseURLCooler.recordFailure(ra.channel.ID, cand.CanonicalURL)
@@ -532,34 +562,31 @@ func (ra *relayAttempt) forwardWithBaseURLFailover(span *balancer.AttemptSpan) (
 }
 
 // isURLCoolableFailure 判定一次失败是否为"端点不可用"信号、应记入 per-(channel,URL) 冷却表。
-// failover 信号 = 连接错误(status=0)/5xx/首 token 超时；429/503（限流，非端点死亡）、
-// 4xx（客户端错误）、已写首字节（端点实际工作过）、客户端取消、continuation（禁 failover）不记。
+// 冷却信号 = 连接错误(status=0)/5xx/首 token 超时；404 仅切换到下一 URL，不冷却整个端点；
+// 其他 4xx（共享请求或凭据错误）、已写首字节（端点实际工作过）、客户端取消、continuation（禁 failover）不记。
 func (ra *relayAttempt) isURLCoolableFailure(statusCode int, fwdErr error) bool {
-	if fwdErr == nil || ra.streamPayloadWritten.Load() {
-		return false
-	}
-	if requiresUpstreamWSContinuation(ra.internalRequest) {
-		return false
-	}
-	if isClientCancellation(ra.requestContext(), fwdErr) {
-		return false
-	}
-	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
-		return false
-	}
-	if statusCode >= 400 && statusCode < 500 {
-		return false
-	}
-	return true
+	return isBaseURLCoolableFailureSignal(
+		ra.requestContext(),
+		statusCode,
+		fwdErr,
+		ra.streamPayloadWritten.Load(),
+		requiresUpstreamWSContinuation(ra.internalRequest),
+	)
 }
 
 // stopURLFailover 判定是否应停止 URL 层失败切换：
-// 最后一个候选、已写首字节、continuation、取消、429/503、4xx 都立即停止。
+// 最后一个候选、已写首字节、continuation、取消、429/503、除 404 外的 4xx 都立即停止。
 func (ra *relayAttempt) stopURLFailover(idx, total int, statusCode int, fwdErr error) bool {
 	if idx >= total-1 {
 		return true
 	}
-	return !ra.isURLCoolableFailure(statusCode, fwdErr)
+	return !isBaseURLFailoverSignal(
+		ra.requestContext(),
+		statusCode,
+		fwdErr,
+		ra.streamPayloadWritten.Load(),
+		requiresUpstreamWSContinuation(ra.internalRequest),
+	)
 }
 
 // parseRequest 解析并验证入站请求
@@ -616,8 +643,7 @@ func (ra *relayAttempt) forward() (int, error) {
 				return statusCode, err
 			}
 			if requiresUpstreamWSContinuation(ra.internalRequest) {
-				balancer.DeleteSticky(ra.apiKeyID, ra.requestModel)
-				return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
+				return http.StatusBadGateway, fmt.Errorf("upstream continuation transport temporarily unavailable")
 			}
 			ra.metrics.SetWSRecovery(dbmodel.RelayLogWSRecoveryDowngrade)
 			// statusCode == -1 means WS not available, fall through to HTTP
@@ -678,8 +704,7 @@ func (ra *relayAttempt) forwardViaWS(ctx context.Context) (int, error) {
 				return statusCode, redialErr
 			}
 			if requiresUpstreamWSContinuation(ra.internalRequest) {
-				balancer.DeleteSticky(ra.apiKeyID, ra.requestModel)
-				return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
+				return http.StatusBadGateway, fmt.Errorf("upstream continuation transport temporarily unavailable")
 			}
 		}
 		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
@@ -706,9 +731,8 @@ func (ra *relayAttempt) forwardViaWS(ctx context.Context) (int, error) {
 				return statusCode, redialErr
 			}
 		}
-		if requiresUpstreamWSContinuation(ra.internalRequest) && isContinuationTransportFailure(err) {
-			balancer.DeleteSticky(ra.apiKeyID, ra.requestModel)
-			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
+		if requiresUpstreamWSContinuation(ra.internalRequest) && needsConversationRestart(relayErrorMessage(err)) {
+			return http.StatusConflict, err
 		}
 		if ra.requestContext().Err() == nil {
 			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
@@ -738,8 +762,7 @@ func (ra *relayAttempt) retryViaFreshUpstreamWS(ctx context.Context, reqBody []b
 		wsUpstreamPool.RemoveConn(redialed)
 		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		if requiresUpstreamWSContinuation(ra.internalRequest) {
-			balancer.DeleteSticky(ra.apiKeyID, ra.requestModel)
-			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
+			return http.StatusBadGateway, fmt.Errorf("upstream continuation transport temporarily unavailable: %w", retryErr), true
 		}
 		return -1, nil, true
 	}
@@ -756,9 +779,8 @@ func (ra *relayAttempt) retryViaFreshUpstreamWS(ctx context.Context, reqBody []b
 		reader.CloseWithError()
 		log.Debugf("fresh upstream WS redial stream failed (channel=%s, key=%d, status=%d, err=%v)",
 			ra.channel.Name, ra.usedKey.ID, reader.StatusCode(), streamErr)
-		if requiresUpstreamWSContinuation(ra.internalRequest) && isContinuationTransportFailure(streamErr) {
-			balancer.DeleteSticky(ra.apiKeyID, ra.requestModel)
-			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
+		if requiresUpstreamWSContinuation(ra.internalRequest) && needsConversationRestart(relayErrorMessage(streamErr)) {
+			return http.StatusConflict, streamErr, true
 		}
 		if ra.requestContext().Err() == nil {
 			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
@@ -771,17 +793,6 @@ func (ra *relayAttempt) retryViaFreshUpstreamWS(ctx context.Context, reqBody []b
 	wsUpstreamPool.RecordWSSuccess(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 	ra.recordSuccessfulWSAffinity(redialed)
 	return http.StatusOK, nil, true
-}
-
-func isContinuationTransportFailure(err error) bool {
-	// Check for empty stream error (both old message and new error type)
-	if errors.Is(err, stream.ErrEmptyUpstreamStream) {
-		return true
-	}
-	message := relayErrorMessage(err)
-	return isUpstreamWSConnectionBroken(err) ||
-		needsConversationRestart(message) ||
-		strings.Contains(message, "ws stream ended before first event")
 }
 
 func (ra *relayAttempt) clientRequestHeaders() http.Header {

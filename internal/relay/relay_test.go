@@ -999,10 +999,11 @@ func TestDefaultWSModeForRequest(t *testing.T) {
 	}
 }
 
-func TestHandlerStopsFailoverWhenContinuationTransportIsUnavailable(t *testing.T) {
+func TestHandlerRetriesTransientContinuationTransportFailureWithoutLosingAffinity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := setupRelayTestDB(t)
 
+	var firstHits atomic.Int32
 	var secondHits atomic.Int32
 	firstChannel := &model.Channel{
 		Name:     "relay-ws-continuation-first",
@@ -1034,7 +1035,7 @@ func TestHandlerStopsFailoverWhenContinuationTransportIsUnavailable(t *testing.T
 		t.Fatalf("ChannelCreate second channel failed: %v", err)
 	}
 
-	group := &model.Group{Name: "relay-ws-continuation-group", Mode: model.GroupModeFailover, SessionKeepTime: 60}
+	group := &model.Group{Name: "relay-ws-continuation-group", Mode: model.GroupModeFailover, SessionKeepTime: 60, RetryEnabled: true, MaxRetries: 2}
 	if err := op.GroupCreate(group, ctx); err != nil {
 		t.Fatalf("GroupCreate failed: %v", err)
 	}
@@ -1045,21 +1046,24 @@ func TestHandlerStopsFailoverWhenContinuationTransportIsUnavailable(t *testing.T
 		t.Fatalf("GroupItemAdd second item failed: %v", err)
 	}
 
-	balancer.SetSticky(77, "relay-ws-continuation-group", firstChannel.ID, firstChannel.Keys[0].ID)
-
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Set("api_key_id", 77)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"relay-ws-continuation-group","previous_response_id":"resp_prev","input":"hello","stream":true}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 
-	// 创建并立即关闭一个连接，模拟池里残留的失效上游 WS。
+	// 每次建立真实上游 WS 后返回临时传输错误，验证重试耗尽后仍锁定原路由。
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
-		conn.Close(websocket.StatusNormalClosure, "")
+		firstHits.Add(1)
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		if _, _, err = conn.Read(r.Context()); err != nil {
+			return
+		}
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"error","status":409,"error":{"code":"stream_disconnected","type":"server_error","message":"stream disconnected"}}`))
 	}))
 	defer wsServer.Close()
 
@@ -1067,29 +1071,49 @@ func TestHandlerStopsFailoverWhenContinuationTransportIsUnavailable(t *testing.T
 	if _, err := op.ChannelUpdate(&model.ChannelUpdateRequest{ID: firstChannel.ID, BaseUrls: &firstChannel.BaseUrls}, ctx); err != nil {
 		t.Fatalf("ChannelUpdate first channel failed: %v", err)
 	}
-
-	pc := TryUpstreamWS(context.Background(), firstChannel, firstChannel.GetBaseUrl(), firstChannel.Keys[0].ChannelKey, firstChannel.Keys[0].ID, c.Request.Header, true)
-	if pc == nil {
-		t.Fatalf("expected initial ws dial to succeed")
+	balancer.SetSticky(77, "relay-ws-continuation-group", firstChannel.ID, firstChannel.Keys[0].ID)
+	if err := getWSAffinityStore().Set(ctx, wsAffinityScope{
+		APIKeyID:     77,
+		GroupID:      group.ID,
+		RequestModel: "relay-ws-continuation-group",
+		ResponseID:   "resp_prev",
+	}, wsAffinityEntry{
+		ChannelID:     firstChannel.ID,
+		ChannelKeyID:  firstChannel.Keys[0].ID,
+		UpstreamModel: "gpt-4o",
+		BaseURLKey:    baseURLKey(firstChannel.GetBaseUrl()),
+	}, time.Minute); err != nil {
+		t.Fatalf("Set affinity failed: %v", err)
 	}
-	pc.conn.Close(websocket.StatusNormalClosure, "")
-	wsUpstreamPool.Put(pc)
 
 	Handler(inbound.InboundTypeOpenAIResponse, c)
 
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("expected continuation transport failure to return 409, got %d body %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected transient continuation transport failure to return 502, got %d body %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "上游连续会话已中断") {
-		t.Fatalf("expected conversation reset error response body, got %s", recorder.Body.String())
+	if body := strings.ToLower(recorder.Body.String()); strings.Contains(body, "restart") || strings.Contains(body, "重新开启对话") {
+		t.Fatalf("transient transport failure must not require conversation restart, got %s", recorder.Body.String())
+	}
+	if firstHits.Load() < 2 {
+		t.Fatalf("expected transient failure to retry the original endpoint, got %d hits", firstHits.Load())
 	}
 	if secondHits.Load() != 0 {
-		t.Fatalf("expected failover to stop before hitting second channel, got %d hits", secondHits.Load())
+		t.Fatalf("expected continuation retry to remain on the original channel, got %d second-channel hits", secondHits.Load())
 	}
-	if sticky := balancer.GetSticky(77, "relay-ws-continuation-group", time.Minute); sticky != nil {
-		t.Fatalf("expected sticky to be cleared after continuation failure, got %#v", sticky)
+	sticky := balancer.GetSticky(77, "relay-ws-continuation-group", time.Minute)
+	if sticky == nil || sticky.ChannelID != firstChannel.ID || sticky.ChannelKeyID != firstChannel.Keys[0].ID {
+		t.Fatalf("expected channel/key sticky to remain unchanged, got %#v", sticky)
 	}
-	wsUpstreamPool.Remove(pc.poolKey)
+	affinity, ok := getWSAffinityStore().Get(context.Background(), wsAffinityScope{
+		APIKeyID:     77,
+		GroupID:      group.ID,
+		RequestModel: "relay-ws-continuation-group",
+		ResponseID:   "resp_prev",
+	})
+	if !ok || affinity.ChannelID != firstChannel.ID || affinity.ChannelKeyID != firstChannel.Keys[0].ID || affinity.BaseURLKey != baseURLKey(firstChannel.GetBaseUrl()) {
+		t.Fatalf("expected response affinity to remain unchanged, got %#v, ok=%t", affinity, ok)
+	}
+	wsUpstreamPool.Remove(newWSPoolKey(firstChannel.ID, firstChannel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, firstChannel, firstChannel.Keys[0].ChannelKey), baseURLKey(firstChannel.GetBaseUrl())))
 	wsUpstreamPool.Remove(newWSPoolKey(secondChannel.ID, secondChannel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, secondChannel, secondChannel.Keys[0].ChannelKey), baseURLKey(secondChannel.GetBaseUrl())))
 }
 
@@ -1171,7 +1195,7 @@ func TestForwardViaWSRedialsFreshRequestAfterStalePooledConnection(t *testing.T)
 	wsUpstreamPool.Remove(stale.poolKey)
 }
 
-func TestForwardViaWSReconnectsContinuationAfterReadFailureBeforeFirstEvent(t *testing.T) {
+func TestForwardViaWSReconnectsContinuationAfterStreamDisconnectedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := setupRelayTestDB(t)
 
@@ -1190,7 +1214,7 @@ func TestForwardViaWSReconnectsContinuationAfterReadFailureBeforeFirstEvent(t *t
 		}
 
 		if accepted.Load() == 1 {
-			conn.Close(websocket.StatusNormalClosure, "")
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"error","status":409,"error":{"code":"stream_disconnected","type":"server_error","message":"stream disconnected"}}`))
 			return
 		}
 

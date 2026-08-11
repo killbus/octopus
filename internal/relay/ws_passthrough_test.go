@@ -138,6 +138,115 @@ func TestForwardViaWSPassthroughNormalizesPayloadAndRecordsMetrics(t *testing.T)
 	}
 }
 
+func TestForwardViaWSPassthroughReconnectsContinuationAfterStreamDisconnectedEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := setupRelayTestDB(t)
+
+	accepted := make(chan struct{}, 2)
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		accepted <- struct{}{}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		if _, _, err = conn.Read(r.Context()); err != nil {
+			return
+		}
+		if len(accepted) == 1 {
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"error","status":502,"error":{"code":"stream_disconnected","type":"server_error","message":"stream disconnected"}}`))
+			return
+		}
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"response.created","response":{"id":"resp_passthrough_recovered","model":"gpt-4o"}}`))
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"response.output_text.delta","response":{"id":"resp_passthrough_recovered","model":"gpt-4o"},"delta":"ok"}`))
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"response.completed","response":{"id":"resp_passthrough_recovered","model":"gpt-4o","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`))
+	}))
+	defer wsServer.Close()
+
+	channel := &model.Channel{
+		Name:     "relay-ws-passthrough-reconnect",
+		Type:     outbound.OutboundTypeOpenAIResponse,
+		Enabled:  true,
+		BaseUrls: []model.BaseUrl{{URL: wsServer.URL + "/v1"}},
+		Model:    "gpt-4o",
+		Keys:     []model.ChannelKey{{Enabled: true, ChannelKey: "passthrough-reconnect-key"}},
+		WSMode:   model.ChannelWSModePassthrough,
+	}
+	if err := op.ChannelCreate(channel, ctx); err != nil {
+		t.Fatalf("ChannelCreate failed: %v", err)
+	}
+
+	const (
+		apiKeyID     = 31
+		groupID      = 41
+		requestModel = "client-model"
+		previousID   = "resp_passthrough_prev"
+	)
+	scope := wsAffinityScope{APIKeyID: apiKeyID, GroupID: groupID, RequestModel: requestModel, ResponseID: previousID}
+	originalAffinity := wsAffinityEntry{
+		ChannelID:     channel.ID,
+		ChannelKeyID:  channel.Keys[0].ID,
+		UpstreamModel: "gpt-4o",
+		BaseURLKey:    baseURLKey(channel.GetBaseUrl()),
+	}
+	if err := getWSAffinityStore().Set(ctx, scope, originalAffinity, time.Minute); err != nil {
+		t.Fatalf("Set affinity failed: %v", err)
+	}
+
+	clientConn, serverConn := newTestWSConnPair(t)
+	defer clientConn.Close(websocket.StatusNormalClosure, "")
+	defer serverConn.Close(websocket.StatusNormalClosure, "")
+
+	rawBody := []byte(`{"type":"response.create","model":"client-model","previous_response_id":"resp_passthrough_prev","input":"hello","stream":true}`)
+	internalReq := &transformerModel.InternalLLMRequest{
+		Model:              "gpt-4o",
+		Stream:             boolPtr(true),
+		PreviousResponseID: stringPtr(previousID),
+		RawAPIFormat:       transformerModel.APIFormatOpenAIResponse,
+	}
+	req := &relayRequest{
+		ctx:             context.Background(),
+		inAdapter:       inbound.Get(inbound.InboundTypeOpenAIResponse),
+		internalRequest: internalReq,
+		metrics:         NewRelayMetrics(apiKeyID, requestModel, rawBody, internalReq),
+		apiKeyID:        apiKeyID,
+		requestModel:    requestModel,
+		groupID:         groupID,
+		groupSessionTTL: 60,
+		rawBody:         rawBody,
+		streamWriter:    NewWSStreamWriter(context.Background(), serverConn),
+	}
+	ra := &relayAttempt{relayRequest: req, outAdapter: outbound.Get(channel.Type), channel: channel, usedKey: channel.Keys[0]}
+
+	status, err := ra.forwardViaWS(context.Background())
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("expected passthrough continuation to recover on the same endpoint, status=%d err=%v", status, err)
+	}
+	if len(accepted) != 2 {
+		t.Fatalf("expected one initial connection and one fresh redial, got %d", len(accepted))
+	}
+	if req.metrics.WSRecovery == nil || *req.metrics.WSRecovery != model.RelayLogWSRecoveryReconnect {
+		t.Fatalf("expected reconnect recovery metric, got %#v", req.metrics.WSRecovery)
+	}
+
+	readCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := 0; i < 3; i++ {
+		_, data, readErr := clientConn.Read(readCtx)
+		if readErr != nil {
+			t.Fatalf("read downstream event %d failed: %v", i, readErr)
+		}
+		if strings.Contains(strings.ToLower(string(data)), "stream_disconnected") || strings.Contains(strings.ToLower(string(data)), `"type":"error"`) {
+			t.Fatalf("transient upstream error frame must not leak downstream before reconnect: %s", data)
+		}
+	}
+
+	affinity, ok := getWSAffinityStore().Get(context.Background(), scope)
+	if !ok || affinity.ChannelID != originalAffinity.ChannelID || affinity.ChannelKeyID != originalAffinity.ChannelKeyID || affinity.BaseURLKey != originalAffinity.BaseURLKey {
+		t.Fatalf("expected previous response affinity to remain unchanged, got %#v, ok=%t", affinity, ok)
+	}
+	wsUpstreamPool.Remove(newWSPoolKey(channel.ID, channel.Keys[0].ID, buildUpstreamWSHeaders(nil, channel, channel.Keys[0].ChannelKey), baseURLKey(channel.GetBaseUrl())))
+}
 func newTestWSConnPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
 	t.Helper()
 	serverConnCh := make(chan *websocket.Conn, 1)
