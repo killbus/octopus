@@ -162,15 +162,6 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 	var lastErr error
 	var lastResult attemptResult
 
-	// 同通道重试次数：启用时使用配置值，否则 1 次（不重试）
-	maxSameChannelRetries := 1
-	if group.RetryEnabled {
-		maxSameChannelRetries = group.MaxRetries
-		if maxSameChannelRetries <= 0 {
-			maxSameChannelRetries = 3
-		}
-	}
-
 	for iter.Next() {
 		select {
 		case <-c.Request.Context().Done():
@@ -250,14 +241,28 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 			continue
 		}
 
+		// 同通道重试次数：failover 模式下强制 1（URL 切换本身即重试语义），
+		// 且必须 per-iteration 重算——maxSameChannelRetries 是循环外固定变量，
+		// 整体改写会被首个 failover 渠道污染并波及后续非 failover 渠道。
+		effectiveMaxRetries := 1
+		if group.RetryEnabled {
+			effectiveMaxRetries = group.MaxRetries
+			if effectiveMaxRetries <= 0 {
+				effectiveMaxRetries = 3
+			}
+		}
+		if channel.BaseUrlMode.Normalize() == dbmodel.BaseUrlModeFailover {
+			effectiveMaxRetries = 1
+		}
+
 		// 同通道重试循环
 		var result attemptResult
-		for retryNum := 0; retryNum < maxSameChannelRetries; retryNum++ {
+		for retryNum := 0; retryNum < effectiveMaxRetries; retryNum++ {
 			// 重试前等待退避
 			if retryNum > 0 {
 				delay := computeBackoff(retryNum, result.RetryAfter)
 				log.Infof("same-channel retry %d/%d for %s, waiting %v",
-					retryNum, maxSameChannelRetries, channel.Name, delay)
+					retryNum, effectiveMaxRetries, channel.Name, delay)
 				select {
 				case <-c.Request.Context().Done():
 					log.Debugf("request context canceled during retry backoff")
@@ -398,8 +403,12 @@ func circuitFailureKind(retryEnabled bool, statusCode int) balancer.FailureKind 
 func (ra *relayAttempt) attempt() attemptResult {
 	span := ra.iter.StartAttempt(ra.channel.ID, ra.usedKey.ID, ra.channel.Name)
 
-	// 转发请求
-	statusCode, fwdErr := ra.forward()
+	// URL 层：解析候选端点。
+	// - continuation 请求在 resolveBaseUrl 层直接应用 affinity 端点（R4，禁 failover）。
+	// - 非 failover 模式取第一个候选（delay=Delay 最小，random/weighted=按权重随机排序后首项）。
+	// - failover 模式逐个尝试候选，失败切下一条（连接错误/5xx），429/503/4xx/已写/continuation 立即停。
+	statusCode, fwdErr := ra.forwardWithBaseURLFailover(span)
+	span.SetBaseURLKey(ra.baseURLKey)
 
 	// 更新 channel key 状态
 	ra.usedKey.StatusCode = statusCode
@@ -407,6 +416,9 @@ func (ra *relayAttempt) attempt() attemptResult {
 
 	if fwdErr == nil {
 		// ====== 成功 ======
+		if ra.baseURL != "" {
+			baseURLCooler.recordSuccess(ra.channel.ID, canonicalBaseURL(ra.baseURL))
+		}
 		// Passthrough handlers collect response at stream end via PassthroughConfig.CollectMetrics
 		ra.collectResponse()
 		ra.usedKey.TotalCost += ra.metrics.Stats.InputCost + ra.metrics.Stats.OutputCost
@@ -473,6 +485,83 @@ func (ra *relayAttempt) attempt() attemptResult {
 	}
 }
 
+// forwardWithBaseURLFailover 在 attempt 内执行 URL 层选择与失败切换。
+// 返回最终 statusCode 与 error。只在 failover 模式下切换端点；其余模式单次转发。
+func (ra *relayAttempt) forwardWithBaseURLFailover(span *balancer.AttemptSpan) (int, error) {
+	// continuation 禁 failover（R4）：在 resolveBaseUrl 层直接应用 affinity 端点并单次转发，
+	// 不进入 URL 失败切换循环——传输型状态物理上无法跨端点续会话。
+	if requiresUpstreamWSContinuation(ra.internalRequest) {
+		ra.applyContinuationAffinity(ra.requestContext())
+		return ra.forward()
+	}
+
+	mode := ra.channel.BaseUrlMode.Normalize()
+	if mode != dbmodel.BaseUrlModeFailover {
+		cand := resolveSingleBaseURL(ra.channel)
+		if cand.URL != "" {
+			ra.baseURL = cand.URL
+			ra.baseURLKey = cand.Key
+		}
+		return ra.forward()
+	}
+
+	candidates := resolveBaseURLs(ra.channel)
+	if len(candidates) == 0 {
+		return ra.forward()
+	}
+	var statusCode int
+	var fwdErr error
+	for idx, cand := range candidates {
+		ra.baseURL = cand.URL
+		ra.baseURLKey = cand.Key
+		statusCode, fwdErr = ra.forward()
+		if fwdErr == nil {
+			return statusCode, nil
+		}
+		// 冷却表记录：仅 failover 信号（连接错误/5xx/首 token 超时）才记录端点失败，
+		// 429/503/4xx/客户端取消/continuation 不记。最后一条候选同样记录，
+		// 使"全部 URL 冷却中时 fail-open 全试"（R7）可经正常失败路径触达。
+		if cand.CanonicalURL != "" && ra.isURLCoolableFailure(statusCode, fwdErr) {
+			baseURLCooler.recordFailure(ra.channel.ID, cand.CanonicalURL)
+		}
+		if ra.stopURLFailover(idx, len(candidates), statusCode, fwdErr) {
+			return statusCode, fwdErr
+		}
+	}
+	return statusCode, fwdErr
+}
+
+// isURLCoolableFailure 判定一次失败是否为"端点不可用"信号、应记入 per-(channel,URL) 冷却表。
+// failover 信号 = 连接错误(status=0)/5xx/首 token 超时；429/503（限流，非端点死亡）、
+// 4xx（客户端错误）、已写首字节（端点实际工作过）、客户端取消、continuation（禁 failover）不记。
+func (ra *relayAttempt) isURLCoolableFailure(statusCode int, fwdErr error) bool {
+	if fwdErr == nil || ra.streamPayloadWritten.Load() {
+		return false
+	}
+	if requiresUpstreamWSContinuation(ra.internalRequest) {
+		return false
+	}
+	if isClientCancellation(ra.requestContext(), fwdErr) {
+		return false
+	}
+	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+		return false
+	}
+	if statusCode >= 400 && statusCode < 500 {
+		return false
+	}
+	return true
+}
+
+// stopURLFailover 判定是否应停止 URL 层失败切换：
+// 最后一个候选、已写首字节、continuation、取消、429/503、4xx 都立即停止。
+func (ra *relayAttempt) stopURLFailover(idx, total int, statusCode int, fwdErr error) bool {
+	if idx >= total-1 {
+		return true
+	}
+	return !ra.isURLCoolableFailure(statusCode, fwdErr)
+}
+
 // parseRequest 解析并验证入站请求
 // 返回值中的 rawBody 为客户端原始请求字节，供同格式直通路径重用。
 func parseRequest(inboundType inbound.InboundType, c *gin.Context) ([]byte, *model.InternalLLMRequest, model.Inbound, error) {
@@ -535,6 +624,10 @@ func (ra *relayAttempt) forward() (int, error) {
 		}
 	}
 
+	if requiresUpstreamWSContinuation(ra.internalRequest) {
+		// HTTP fallback continuation：沿用 affinity URL 语义，避免 WS/HTTP 两路分裂（R3）
+		ra.applyContinuationAffinity(ctx)
+	}
 	return ra.forwardViaHTTP(ctx)
 }
 
@@ -548,8 +641,11 @@ func (ra *relayAttempt) forwardViaWS(ctx context.Context) (int, error) {
 	preferredConnID := ""
 	if continuation {
 		preferredConnID, _ = getWSResponseConn(currentPreviousResponseID(ra.internalRequest))
+		// 续会话必须回原端点（R3）：从 affinity 反查 URL 并覆盖 baseURL，
+		// 保证 WS 池命中与上次相同 poolKey 桶。
+		ra.applyContinuationAffinity(ctx)
 	}
-	pc := TryUpstreamWSWithPreference(ctx, ra.channel, ra.channel.GetBaseUrl(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), preferredConnID)
+	pc := TryUpstreamWSWithPreference(ctx, ra.channel, ra.effectiveBaseURL(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), preferredConnID)
 	if pc == nil {
 		log.Debugf("upstream WS unavailable for channel %s (key=%d, continuation=%t)", ra.channel.Name, ra.usedKey.ID, continuation)
 		return -1, nil // WS not available
@@ -586,7 +682,7 @@ func (ra *relayAttempt) forwardViaWS(ctx context.Context) (int, error) {
 				return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
 			}
 		}
-		wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		return -1, nil // fall through to HTTP
 	}
 
@@ -615,13 +711,13 @@ func (ra *relayAttempt) forwardViaWS(ctx context.Context) (int, error) {
 			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
 		}
 		if ra.requestContext().Err() == nil {
-			wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		}
 		return reader.StatusCode(), err
 	}
 
 	reader.Close()
-	wsUpstreamPool.RecordWSSuccess(ra.channel.ID)
+	wsUpstreamPool.RecordWSSuccess(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 	ra.recordSuccessfulWSAffinity(pc)
 	return 200, nil
 }
@@ -629,7 +725,7 @@ func (ra *relayAttempt) forwardViaWS(ctx context.Context) (int, error) {
 func (ra *relayAttempt) retryViaFreshUpstreamWS(ctx context.Context, reqBody []byte) (int, error, bool) {
 	log.Debugf("attempting fresh upstream WS redial (channel=%s, key=%d, previous_response_id=%s)",
 		ra.channel.Name, ra.usedKey.ID, currentPreviousResponseID(ra.internalRequest))
-	redialed := TryUpstreamWS(ctx, ra.channel, ra.channel.GetBaseUrl(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), true)
+	redialed := TryUpstreamWS(ctx, ra.channel, ra.effectiveBaseURL(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), true)
 	if redialed == nil {
 		log.Debugf("fresh upstream WS redial unavailable (channel=%s, key=%d)", ra.channel.Name, ra.usedKey.ID)
 		return 0, nil, false
@@ -640,7 +736,7 @@ func (ra *relayAttempt) retryViaFreshUpstreamWS(ctx context.Context, reqBody []b
 		log.Warnf("upstream WS redial send failed for channel %s: %v", ra.channel.Name, retryErr)
 		log.Debugf("fresh upstream WS redial send failed (channel=%s, key=%d, err=%v)", ra.channel.Name, ra.usedKey.ID, retryErr)
 		wsUpstreamPool.RemoveConn(redialed)
-		wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		if requiresUpstreamWSContinuation(ra.internalRequest) {
 			balancer.DeleteSticky(ra.apiKeyID, ra.requestModel)
 			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
@@ -665,14 +761,14 @@ func (ra *relayAttempt) retryViaFreshUpstreamWS(ctx context.Context, reqBody []b
 			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
 		}
 		if ra.requestContext().Err() == nil {
-			wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		}
 		return reader.StatusCode(), streamErr, true
 	}
 	log.Debugf("fresh upstream WS redial succeeded (channel=%s, key=%d, previous_response_id=%s)",
 		ra.channel.Name, ra.usedKey.ID, currentPreviousResponseID(ra.internalRequest))
 	reader.Close()
-	wsUpstreamPool.RecordWSSuccess(ra.channel.ID)
+	wsUpstreamPool.RecordWSSuccess(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 	ra.recordSuccessfulWSAffinity(redialed)
 	return http.StatusOK, nil, true
 }
@@ -777,7 +873,7 @@ func (ra *relayAttempt) forwardViaHTTPPassthrough(ctx context.Context, pt model.
 		ctx,
 		ra.rawBody,
 		ra.internalRequest.Model,
-		ra.channel.GetBaseUrl(),
+		ra.effectiveBaseURL(),
 		ra.usedKey.ChannelKey,
 		ra.internalRequest.Query,
 	)
@@ -861,7 +957,7 @@ func (ra *relayAttempt) forwardViaHTTPStandard(ctx context.Context) (int, error)
 	outboundRequest, err := ra.outAdapter.TransformRequest(
 		ctx,
 		ra.internalRequest,
-		ra.channel.GetBaseUrl(),
+		ra.effectiveBaseURL(),
 		ra.usedKey.ChannelKey,
 	)
 	if err != nil {

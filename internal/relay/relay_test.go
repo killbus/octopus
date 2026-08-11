@@ -1090,7 +1090,7 @@ func TestHandlerStopsFailoverWhenContinuationTransportIsUnavailable(t *testing.T
 		t.Fatalf("expected sticky to be cleared after continuation failure, got %#v", sticky)
 	}
 	wsUpstreamPool.Remove(pc.poolKey)
-	wsUpstreamPool.Remove(newWSPoolKey(secondChannel.ID, secondChannel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, secondChannel, secondChannel.Keys[0].ChannelKey)))
+	wsUpstreamPool.Remove(newWSPoolKey(secondChannel.ID, secondChannel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, secondChannel, secondChannel.Keys[0].ChannelKey), baseURLKey(secondChannel.GetBaseUrl())))
 }
 
 func TestForwardViaWSRedialsFreshRequestAfterStalePooledConnection(t *testing.T) {
@@ -1247,7 +1247,7 @@ func TestForwardViaWSReconnectsContinuationAfterReadFailureBeforeFirstEvent(t *t
 	if !strings.Contains(writer.Body.String(), `"response.completed"`) {
 		t.Fatalf("expected ws reconnect stream to complete, got %s", writer.Body.String())
 	}
-	wsUpstreamPool.Remove(newWSPoolKey(channel.ID, channel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, channel, channel.Keys[0].ChannelKey)))
+	wsUpstreamPool.Remove(newWSPoolKey(channel.ID, channel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, channel, channel.Keys[0].ChannelKey), baseURLKey(channel.GetBaseUrl())))
 }
 
 func TestForwardDoesNotUseWSForFreshHTTPIngress(t *testing.T) {
@@ -1425,7 +1425,7 @@ func TestForwardViaWSPreservesClientUserAgentHeaders(t *testing.T) {
 		t.Fatalf("expected accept-language to be forwarded, got %#v", got)
 	}
 
-	wsUpstreamPool.Remove(newWSPoolKey(channel.ID, channel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, channel, channel.Keys[0].ChannelKey)))
+	wsUpstreamPool.Remove(newWSPoolKey(channel.ID, channel.Keys[0].ID, buildUpstreamWSHeaders(c.Request.Header, channel, channel.Keys[0].ChannelKey), baseURLKey(channel.GetBaseUrl())))
 }
 
 func TestHandlerRetryEnabledDoesNotTurnRecent429IntoNoAvailableKey(t *testing.T) {

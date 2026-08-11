@@ -1,4 +1,4 @@
-import { ChannelType, type AutoGroupType, type Channel, type ChannelWSMode, useFetchModel } from '@/api/endpoints/channel';
+import { BaseUrlMode, ChannelType, type AutoGroupType, type Channel, type ChannelWSMode, useFetchModel } from '@/api/endpoints/channel';
 import { ProxySelector } from '@/components/modules/proxy-pool/ProxySelector';
 import {
     Select,
@@ -30,6 +30,7 @@ export interface ChannelFormData {
     name: string;
     type: ChannelType;
     base_urls: Channel['base_urls'];
+    base_url_mode: BaseUrlMode;
     custom_header: Channel['custom_header'];
     ws_mode: ChannelWSMode;
     proxy_mode: Channel['proxy_mode'];
@@ -291,6 +292,17 @@ export function ChannelForm({
                                 required={idx === 0}
                                 className="rounded-xl flex-1"
                             />
+                            {formData.base_url_mode === BaseUrlMode.Weighted ? (
+                                <Input
+                                    type="number"
+                                    min={1}
+                                    value={u.weight ?? 1}
+                                    onChange={(e) => handleUpdateBaseUrl(idx, { weight: Number(e.target.value) || 1 })}
+                                    placeholder={t('baseUrlWeight')}
+                                    className="rounded-xl w-20"
+                                    title="Weight"
+                                />
+                            ) : null}
                             <Button
                                 type="button"
                                 variant="ghost"
@@ -477,6 +489,25 @@ export function ChannelForm({
                     </AccordionTrigger>
                     <AccordionContent className="pt-4 px-4 pb-4 space-y-4 border-t">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                                <label htmlFor={`${idPrefix}-base-url-mode`} className="text-sm font-medium text-card-foreground">
+                                    {t('baseUrlMode')}
+                                </label>
+                                <Select
+                                    value={String(formData.base_url_mode ?? BaseUrlMode.Delay)}
+                                    onValueChange={(value) => onFormDataChange({ ...formData, base_url_mode: Number(value) as BaseUrlMode })}
+                                >
+                                    <SelectTrigger id={`${idPrefix}-base-url-mode`} className="rounded-xl w-full border border-border px-4 py-2 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent className='rounded-xl'>
+                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Delay)}>{t('baseUrlModeDelay')}</SelectItem>
+                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Failover)}>{t('baseUrlModeFailover')}</SelectItem>
+                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Random)}>{t('baseUrlModeRandom')}</SelectItem>
+                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Weighted)}>{t('baseUrlModeWeighted')}</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
                             {formData.type === ChannelType.OpenAIResponse ? (
                                 <div className="space-y-2">
                                     <label htmlFor={`${idPrefix}-ws-mode`} className="text-sm font-medium text-card-foreground">

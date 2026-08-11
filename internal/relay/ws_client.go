@@ -397,7 +397,11 @@ func warmupUpstreamWSConnection(ctx context.Context, channel *dbmodel.Channel, u
 	warmupCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	pc := TryUpstreamWS(warmupCtx, channel, channel.GetBaseUrl(), usedKey.ChannelKey, usedKey.ID, nil)
+	baseURL := resolveSingleBaseURL(channel).URL
+	if baseURL == "" {
+		baseURL = channel.GetBaseUrl()
+	}
+	pc := TryUpstreamWS(warmupCtx, channel, baseURL, usedKey.ChannelKey, usedKey.ID, nil)
 	if pc == nil {
 		return fmt.Errorf("upstream ws unavailable")
 	}
@@ -457,14 +461,6 @@ func runWSRelay(ctx context.Context, req *relayRequest, group *dbmodel.Group) ws
 		defer cancel()
 		if req != nil {
 			req.ctx = relayCtx
-		}
-	}
-
-	maxSameChannelRetries := 1
-	if group.RetryEnabled {
-		maxSameChannelRetries = group.MaxRetries
-		if maxSameChannelRetries <= 0 {
-			maxSameChannelRetries = 3
 		}
 	}
 
@@ -547,7 +543,19 @@ func runWSRelay(ctx context.Context, req *relayRequest, group *dbmodel.Group) ws
 			req.requestModel, channel.Name, item.ModelName, req.iter.Index()+1, req.iter.Len())
 
 		var result attemptResult
-		for retryNum := 0; retryNum < maxSameChannelRetries; retryNum++ {
+		// 同通道重试次数：failover 模式下强制 1（URL 切换本身即重试语义），
+		// per-iteration 覆盖——不能整体改写（否则首个 failover 渠道会污染变量、波及后续渠道）。
+		effectiveMaxRetries := 1
+		if group.RetryEnabled {
+			effectiveMaxRetries = group.MaxRetries
+			if effectiveMaxRetries <= 0 {
+				effectiveMaxRetries = 3
+			}
+		}
+		if channel.BaseUrlMode.Normalize() == dbmodel.BaseUrlModeFailover {
+			effectiveMaxRetries = 1
+		}
+		for retryNum := 0; retryNum < effectiveMaxRetries; retryNum++ {
 			if retryNum > 0 {
 				delay := computeBackoff(retryNum, result.RetryAfter)
 				select {

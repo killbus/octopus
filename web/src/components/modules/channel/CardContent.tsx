@@ -11,7 +11,7 @@ import {
     Globe,
     Key
 } from 'lucide-react';
-import { useUpdateChannel, useDeleteChannel, type Channel, type UpdateChannelRequest } from '@/api/endpoints/channel';
+import { useUpdateChannel, useDeleteChannel, BaseUrlMode, type Channel, type UpdateChannelRequest } from '@/api/endpoints/channel';
 import {
     MorphingDialogTitle,
     MorphingDialogDescription,
@@ -41,6 +41,7 @@ export function CardContent({ channel, stats }: { channel: Channel; stats: Stats
         type: channel.type,
         enabled: channel.enabled,
         base_urls: channel.base_urls?.length ? channel.base_urls : [{ url: '', delay: 0 }],
+        base_url_mode: channel.base_url_mode ?? BaseUrlMode.Delay,
         custom_header: channel.custom_header ?? [],
         ws_mode: channel.ws_mode ?? 'inherit',
         proxy_mode: channel.proxy_mode ?? 'direct',
@@ -85,7 +86,11 @@ export function CardContent({ channel, stats }: { channel: Channel; stats: Stats
             req.base_urls = (formData.base_urls ?? []).filter((u) => u.url.trim()).map((u) => ({
                 url: u.url.trim(),
                 delay: Number(u.delay || 0),
+                ...(formData.base_url_mode === BaseUrlMode.Weighted ? { weight: Number(u.weight || 1) } : {}),
             }));
+        }
+        if ((formData.base_url_mode ?? BaseUrlMode.Delay) !== (channel.base_url_mode ?? BaseUrlMode.Delay)) {
+            req.base_url_mode = formData.base_url_mode;
         }
         if (formData.model !== channel.model) req.model = formData.model;
         if (formData.custom_model !== channel.custom_model) req.custom_model = formData.custom_model;

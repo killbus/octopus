@@ -5,7 +5,7 @@ import {
     MorphingDialogDescription,
     useMorphingDialog,
 } from '@/components/ui/morphing-dialog';
-import { useCreateChannel, ChannelType, AutoGroupType } from '@/api/endpoints/channel';
+import { useCreateChannel, AutoGroupType, BaseUrlMode, ChannelType } from '@/api/endpoints/channel';
 import { useTranslations } from 'next-intl';
 import { toast } from '@/components/common/Toast';
 import { ChannelForm, type ChannelFormData } from './Form';
@@ -17,6 +17,7 @@ export function CreateDialogContent() {
         name: '',
         type: ChannelType.OpenAIChat,
         base_urls: [{ url: '', delay: 0 }],
+        base_url_mode: BaseUrlMode.Delay,
         custom_header: [],
         ws_mode: 'inherit',
         proxy_mode: 'direct',
@@ -38,6 +39,7 @@ export function CreateDialogContent() {
         const normalizedBaseUrls = (formData.base_urls ?? []).filter((u) => u.url.trim()).map((u) => ({
             url: u.url.trim(),
             delay: Number(u.delay || 0),
+            ...(formData.base_url_mode === BaseUrlMode.Weighted ? { weight: Number(u.weight || 1) } : {}),
         }));
         const normalizedKeys = formData.keys
             .filter((k) => k.channel_key.trim())
@@ -57,6 +59,7 @@ export function CreateDialogContent() {
                 type: formData.type,
                 enabled: formData.enabled,
                 base_urls: normalizedBaseUrls,
+                base_url_mode: formData.base_url_mode,
                 keys: normalizedKeys,
                 model: formData.model,
                 custom_model: formData.custom_model,
@@ -75,6 +78,7 @@ export function CreateDialogContent() {
                         name: '',
                         type: ChannelType.OpenAIChat,
                         base_urls: [{ url: '', delay: 0 }],
+                        base_url_mode: BaseUrlMode.Delay,
                         custom_header: [],
                         ws_mode: 'inherit',
                         proxy_mode: 'direct',

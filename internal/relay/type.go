@@ -127,6 +127,38 @@ type relayAttempt struct {
 	firstTokenTimeOutSec int
 	firstTokenBudget     *firstTokenBudget
 	retryAfter           time.Duration // forward() 提取后暂存
+
+	// baseURL 是本次 attempt 实际使用的上游端点（由 resolveBaseURLs 在 attempt 层解析一次）。
+	// baseURLKey 是 canonicalBaseURL 的 sha256 指纹，用于 WS 池键与 affinity 持久化。
+	baseURL    string
+	baseURLKey string
+}
+
+// effectiveBaseURL 返回本次 attempt 的实际上游端点。
+// 未预置时回退到 channel.GetBaseUrl()（兼容未走 URL 层的调用路径）。
+func (ra *relayAttempt) effectiveBaseURL() string {
+	if ra != nil && ra.baseURL != "" {
+		return ra.baseURL
+	}
+	if ra != nil && ra.channel != nil {
+		return ra.channel.GetBaseUrl()
+	}
+	return ""
+}
+
+// channelNameForLog / baseURLForLog 供日志观测使用（URL 维度，design step 12）。
+func (ra *relayAttempt) channelNameForLog() string {
+	if ra == nil || ra.channel == nil {
+		return ""
+	}
+	return ra.channel.Name
+}
+
+func (ra *relayAttempt) baseURLForLog() string {
+	if ra == nil {
+		return ""
+	}
+	return ra.effectiveBaseURL()
 }
 
 // attemptResult 封装单次尝试的结果

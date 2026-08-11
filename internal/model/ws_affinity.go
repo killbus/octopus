@@ -13,6 +13,7 @@ type WSResponseAffinity struct {
 	ChannelID      int       `json:"channel_id" gorm:"not null"`
 	ChannelKeyID   int       `json:"channel_key_id" gorm:"not null"`
 	UpstreamModel  string    `json:"upstream_model" gorm:"size:191"`
+	BaseURLKey     string    `json:"base_url_key" gorm:"size:64"` // 传输型粘滞：sha256hex(canonicalBaseURL)；空=会话型/旧数据
 	ExpiresAt      time.Time `json:"expires_at" gorm:"not null;index"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`

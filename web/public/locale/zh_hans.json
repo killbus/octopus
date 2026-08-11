@@ -900,6 +900,12 @@
             "wsModePassthrough": "直通",
             "wsModeTransform": "转换",
             "wsModeOff": "关闭",
+            "baseUrlMode": "端点路由策略",
+            "baseUrlModeDelay": "延迟择优",
+            "baseUrlModeFailover": "故障切换",
+            "baseUrlModeRandom": "随机",
+            "baseUrlModeWeighted": "加权分配",
+            "baseUrlWeight": "权重",
             "matchRegex": "匹配正则",
             "matchRegexPlaceholder": "可选：用于匹配请求模型名称的正则表达式",
             "remark": "备注"

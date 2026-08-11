@@ -543,7 +543,10 @@ func imagesAttempt(
 	hb *earlyHeartbeat,
 ) (statusCode int, written bool, usage *imagesUsage, upstreamCT string, err error) {
 	// 构建 URL（baseUrl.Path 后追加 endpoint）
-	baseURL := channel.GetBaseUrl()
+	baseURL := resolveSingleBaseURL(channel).URL
+	if baseURL == "" {
+		baseURL = channel.GetBaseUrl()
+	}
 	parsedURL, err := url.Parse(strings.TrimSuffix(baseURL, "/"))
 	if err != nil {
 		return 0, false, nil, "", fmt.Errorf("failed to parse base url: %w", err)

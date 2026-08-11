@@ -30,6 +30,7 @@ type wsAffinityEntry struct {
 	ChannelID     int
 	ChannelKeyID  int
 	UpstreamModel string
+	BaseURLKey    string // 传输型粘滞：canonicalBaseURL 指纹；空 = 会话型/旧数据
 	ExpiresAt     time.Time
 }
 
@@ -93,6 +94,7 @@ func (s *dbWSAffinityStore) Get(ctx context.Context, scope wsAffinityScope) (*ws
 		ChannelID:     record.ChannelID,
 		ChannelKeyID:  record.ChannelKeyID,
 		UpstreamModel: strings.TrimSpace(record.UpstreamModel),
+		BaseURLKey:    strings.TrimSpace(record.BaseURLKey),
 		ExpiresAt:     record.ExpiresAt,
 	}
 	if s != nil && s.hot != nil {
@@ -112,6 +114,7 @@ func (s *dbWSAffinityStore) Set(ctx context.Context, scope wsAffinityScope, entr
 	expiresAt := time.Now().Add(ttl)
 	entry.ExpiresAt = expiresAt
 	entry.UpstreamModel = strings.TrimSpace(entry.UpstreamModel)
+	entry.BaseURLKey = strings.TrimSpace(entry.BaseURLKey)
 	if s != nil && s.hot != nil {
 		s.hot.Set(key, entry)
 	}
@@ -131,6 +134,7 @@ func (s *dbWSAffinityStore) Set(ctx context.Context, scope wsAffinityScope, entr
 		ChannelID:      entry.ChannelID,
 		ChannelKeyID:   entry.ChannelKeyID,
 		UpstreamModel:  entry.UpstreamModel,
+		BaseURLKey:     entry.BaseURLKey,
 		ExpiresAt:      expiresAt,
 	}
 	return dbConn.WithContext(ctx).Clauses(clause.OnConflict{
@@ -140,7 +144,7 @@ func (s *dbWSAffinityStore) Set(ctx context.Context, scope wsAffinityScope, entr
 			{Name: "request_model"},
 			{Name: "response_id_hash"},
 		},
-		DoUpdates: clause.AssignmentColumns([]string{"channel_id", "channel_key_id", "upstream_model", "expires_at", "updated_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"channel_id", "channel_key_id", "upstream_model", "base_url_key", "expires_at", "updated_at"}),
 	}).Create(&record).Error
 }
 

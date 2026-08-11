@@ -272,7 +272,11 @@ func forwardResponsesCompact(c *gin.Context, metrics *RelayMetrics, iter *balanc
 }
 
 func buildResponsesCompactRequest(ctx context.Context, channel *dbmodel.Channel, key string, requestBody []byte) (*http.Request, error) {
-	parsedURL, err := url.Parse(strings.TrimSuffix(channel.GetBaseUrl(), "/"))
+	baseURL := resolveSingleBaseURL(channel).URL
+	if baseURL == "" {
+		baseURL = channel.GetBaseUrl()
+	}
+	parsedURL, err := url.Parse(strings.TrimSuffix(baseURL, "/"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}

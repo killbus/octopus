@@ -20,6 +20,7 @@ type ChannelAttempt struct {
 	Status       AttemptStatus `json:"status"`
 	Duration     int           `json:"duration"`
 	Sticky       bool          `json:"sticky,omitempty"`
+	BaseURLKey   string        `json:"base_url_key,omitempty"` // URL 层端点指纹（sha256hex(canonicalBaseURL)），空=未走 URL 层
 	Msg          string        `json:"msg,omitempty"`
 }
 

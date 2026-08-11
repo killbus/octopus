@@ -133,6 +133,7 @@ func ProjectAccount(ctx context.Context, accountID int) ([]int, error) {
 				Type:          obType,
 				Enabled:       enabled,
 				BaseUrls:      baseUrls,
+				BaseUrlMode:   model.BaseUrlModeDelay,
 				Keys:          buildChannelKeys(groupTokens, siteRecord.Platform),
 				Model:         strings.Join(modelNames, ","),
 				CustomModel:   "",

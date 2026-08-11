@@ -17,6 +17,35 @@ const (
 	AutoGroupTypeRegex AutoGroupType = 3 //正则匹配
 )
 
+// BaseUrlMode 控制一个渠道的多端点（BaseUrls 候选）选择策略。
+// 0 基枚举，0 为默认哨兵（delay），与 AutoGroupType 先例一致。
+// 与分组层 GroupMode 正交：URL 层管渠道内端点选择，分组层管渠道间选择。
+type BaseUrlMode int
+
+const (
+	BaseUrlModeDelay    BaseUrlMode = 0 // 延迟择优：取 Delay 最小的一条（现状行为）
+	BaseUrlModeFailover BaseUrlMode = 1 // 故障切换：按 Delay 升序，失败时切下一条
+	BaseUrlModeRandom   BaseUrlMode = 2 // 随机：等权或按 Weight 加权随机
+	BaseUrlModeWeighted BaseUrlMode = 3 // 加权分配：按 Weight 加权随机
+)
+
+func (m BaseUrlMode) Valid() bool {
+	switch m {
+	case BaseUrlModeDelay, BaseUrlModeFailover, BaseUrlModeRandom, BaseUrlModeWeighted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Normalize 兜底非法值到默认 delay，与 ChannelWSMode.Normalize 语义一致。
+func (m BaseUrlMode) Normalize() BaseUrlMode {
+	if m.Valid() {
+		return m
+	}
+	return BaseUrlModeDelay
+}
+
 func (t AutoGroupType) Valid() bool {
 	switch t {
 	case AutoGroupTypeNone, AutoGroupTypeFuzzy, AutoGroupTypeExact, AutoGroupTypeRegex:
@@ -65,6 +94,7 @@ type Channel struct {
 	Type          outbound.OutboundType `json:"type"`
 	Enabled       bool                  `json:"enabled" gorm:"default:true"`
 	BaseUrls      []BaseUrl             `json:"base_urls" gorm:"serializer:json"`
+	BaseUrlMode   BaseUrlMode           `json:"base_url_mode" gorm:"type:int;default:0"`
 	Keys          []ChannelKey          `json:"keys" gorm:"foreignKey:ChannelID"`
 	Model         string                `json:"model"`
 	CustomModel   string                `json:"custom_model"`
@@ -110,8 +140,9 @@ type ManagedChannelSource struct {
 }
 
 type BaseUrl struct {
-	URL   string `json:"url"`
-	Delay int    `json:"delay"`
+	URL    string `json:"url"`
+	Delay  int    `json:"delay"`
+	Weight int    `json:"weight,omitempty"` // 仅 base_url_mode=weighted/random 时参与加权随机；其余模式忽略
 }
 
 type CustomHeader struct {
@@ -142,6 +173,7 @@ type ChannelUpdateRequest struct {
 	Type          *outbound.OutboundType `json:"type,omitempty"`
 	Enabled       *bool                  `json:"enabled,omitempty"`
 	BaseUrls      *[]BaseUrl             `json:"base_urls,omitempty"`
+	BaseUrlMode   *BaseUrlMode           `json:"base_url_mode,omitempty"`
 	Model         *string                `json:"model,omitempty"`
 	CustomModel   *string                `json:"custom_model,omitempty"`
 	ProxyMode     *ProxyUsageMode        `json:"proxy_mode,omitempty"`

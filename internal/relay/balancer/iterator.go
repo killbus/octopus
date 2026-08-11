@@ -167,6 +167,14 @@ func (it *Iterator) StartAttempt(channelID, channelKeyID int, channelName string
 	}
 }
 
+// SetBaseURLKey 记录本次尝试实际使用的 URL 层端点指纹（观测性）。
+func (s *AttemptSpan) SetBaseURLKey(baseURLKey string) {
+	if s == nil {
+		return
+	}
+	s.attempt.BaseURLKey = baseURLKey
+}
+
 // Attempts 返回所有决策记录（交给日志模块持久化）
 func (it *Iterator) Attempts() []model.ChannelAttempt {
 	return it.attempts

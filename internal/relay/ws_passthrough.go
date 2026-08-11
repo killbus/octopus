@@ -59,8 +59,9 @@ func (ra *relayAttempt) forwardViaWSPassthrough(ctx context.Context) (int, error
 	preferredConnID := ""
 	if continuation {
 		preferredConnID, _ = getWSResponseConn(currentPreviousResponseID(ra.internalRequest))
+		ra.applyContinuationAffinity(ctx)
 	}
-	pc := TryUpstreamWSWithPreference(ctx, ra.channel, ra.channel.GetBaseUrl(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), preferredConnID)
+	pc := TryUpstreamWSWithPreference(ctx, ra.channel, ra.effectiveBaseURL(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), preferredConnID)
 	if pc == nil {
 		log.Debugf("upstream WS passthrough unavailable for channel %s (key=%d, continuation=%t)", ra.channel.Name, ra.usedKey.ID, continuation)
 		return -1, nil
@@ -84,7 +85,7 @@ func (ra *relayAttempt) forwardViaWSPassthrough(ctx context.Context) (int, error
 				return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
 			}
 		}
-		wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		return -1, nil
 	}
 
@@ -107,25 +108,25 @@ func (ra *relayAttempt) forwardViaWSPassthrough(ctx context.Context) (int, error
 			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation")
 		}
 		if ra.requestContext().Err() == nil {
-			wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		}
 		return http.StatusBadGateway, err
 	}
 	wsUpstreamPool.Put(pc)
-	wsUpstreamPool.RecordWSSuccess(ra.channel.ID)
+	wsUpstreamPool.RecordWSSuccess(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 	ra.applyWSPassthroughStats(stats)
 	ra.recordSuccessfulWSAffinity(pc)
 	return http.StatusOK, nil
 }
 
 func (ra *relayAttempt) retryViaFreshUpstreamWSPassthrough(ctx context.Context, payload []byte) (int, error, bool) {
-	redialed := TryUpstreamWSWithPreference(ctx, ra.channel, ra.channel.GetBaseUrl(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), "", true)
+	redialed := TryUpstreamWSWithPreference(ctx, ra.channel, ra.effectiveBaseURL(), ra.usedKey.ChannelKey, ra.usedKey.ID, ra.clientRequestHeaders(), "", true)
 	if redialed == nil {
 		return 0, nil, false
 	}
 	if err := wsUpstreamPool.SendRaw(ctx, redialed, payload); err != nil {
 		wsUpstreamPool.RemoveConn(redialed)
-		wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+		wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		if requiresUpstreamWSContinuation(ra.internalRequest) {
 			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
 		}
@@ -145,12 +146,12 @@ func (ra *relayAttempt) retryViaFreshUpstreamWSPassthrough(ctx context.Context, 
 			return http.StatusConflict, fmt.Errorf("upstream continuation transport unavailable; please restart the conversation"), true
 		}
 		if ra.requestContext().Err() == nil {
-			wsUpstreamPool.RecordWSFailure(ra.channel.ID)
+			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		}
 		return http.StatusBadGateway, err, true
 	}
 	wsUpstreamPool.Put(redialed)
-	wsUpstreamPool.RecordWSSuccess(ra.channel.ID)
+	wsUpstreamPool.RecordWSSuccess(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 	ra.applyWSPassthroughStats(stats)
 	ra.recordSuccessfulWSAffinity(redialed)
 	return http.StatusOK, nil, true

@@ -31,7 +31,15 @@ export type ChannelWSMode = 'inherit' | 'off' | 'passthrough' | 'transform';
 export type BaseUrl = {
     url: string;
     delay: number;
+    weight?: number;
 };
+
+export enum BaseUrlMode {
+    Delay = 0,    // 延迟择优
+    Failover = 1, // 故障切换
+    Random = 2,   // 随机
+    Weighted = 3, // 加权分配
+}
 
 export type CustomHeader = {
     header_key: string;
@@ -65,6 +73,7 @@ export type Channel = {
     type: ChannelType;
     enabled: boolean;
     base_urls: BaseUrl[];
+    base_url_mode: BaseUrlMode;
     keys: ChannelKey[];
     model: string;
     custom_model: string;
@@ -96,6 +105,7 @@ export type CreateChannelRequest = {
     type: ChannelType;
     enabled?: boolean;
     base_urls: BaseUrl[];
+    base_url_mode?: BaseUrlMode;
     keys: Array<Pick<ChannelKey, 'enabled' | 'channel_key' | 'remark'>>;
     model: string;
     custom_model?: string;
@@ -118,6 +128,7 @@ export type UpdateChannelRequest = {
     type?: ChannelType;
     enabled?: boolean;
     base_urls?: BaseUrl[];
+    base_url_mode?: BaseUrlMode;
     model?: string;
     custom_model?: string;
     proxy_mode?: Exclude<ProxyMode, 'inherit'>;
@@ -167,6 +178,7 @@ export function useChannelList() {
                 managed: item.managed ?? false,
                 managed_source: item.managed_source ?? null,
                 base_urls: item.base_urls ?? [],
+                base_url_mode: item.base_url_mode ?? BaseUrlMode.Delay,
                 custom_header: item.custom_header ?? [],
                 ws_mode: item.ws_mode ?? 'inherit',
                 keys: item.keys ?? [],

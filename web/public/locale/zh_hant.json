@@ -900,6 +900,12 @@
             "wsModePassthrough": "直通",
             "wsModeTransform": "轉換",
             "wsModeOff": "關閉",
+            "baseUrlMode": "端點路由策略",
+            "baseUrlModeDelay": "延遲擇優",
+            "baseUrlModeFailover": "故障切換",
+            "baseUrlModeRandom": "隨機",
+            "baseUrlModeWeighted": "加權分配",
+            "baseUrlWeight": "權重",
             "matchRegex": "匹配正規",
             "matchRegexPlaceholder": "可選：用於匹配請求模型名稱的正規表示式",
             "remark": "備註"

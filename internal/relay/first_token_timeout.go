@@ -104,7 +104,8 @@ func (ra *relayAttempt) firstTokenTimeoutIfNeeded(ctx context.Context, err error
 	if isFirstTokenTimeout(ctx, err) || isFirstTokenTimeout(ctx, contextError(ctx)) ||
 		isFirstTokenTimeout(budgetCtx, err) || isFirstTokenTimeout(budgetCtx, contextError(budgetCtx)) {
 		if ra != nil && ra.firstTokenTimeOutSec > 0 {
-			log.Warnf("first token timeout (%ds), switching channel", ra.firstTokenTimeOutSec)
+			log.Warnf("first token timeout (%ds), switching channel (channel=%s, base_url=%s)",
+				ra.firstTokenTimeOutSec, ra.channelNameForLog(), ra.baseURLForLog())
 		}
 		return ra.firstTokenTimeoutError()
 	}

@@ -38,9 +38,10 @@ const (
 var wsUpstreamPool = newWSPool()
 
 type wsPoolKey struct {
-	channelID int
-	keyID     int
-	headerSig string
+	channelID  int
+	keyID      int
+	headerSig  string
+	baseURLKey string // 传输型粘滞：canonicalBaseURL 的 sha256 指纹；空 = 旧行为/未解析
 }
 
 type pooledConn struct {
@@ -81,11 +82,11 @@ type wsPool struct {
 	inFlight map[wsPoolKey]int
 
 	// Track channels that don't support WS to avoid repeated attempts
-	unsupported   map[int]time.Time
+	unsupported   map[string]time.Time
 	unsupportedMu sync.RWMutex
 
-	// Track transient WS failures per channel for exponential backoff
-	health   map[int]*wsChannelHealth
+	// Track transient WS failures per channel endpoint for exponential backoff
+	health   map[string]*wsChannelHealth
 	healthMu sync.RWMutex
 
 	stopCh chan struct{}
@@ -96,8 +97,8 @@ func newWSPool() *wsPool {
 	p := &wsPool{
 		conns:       make(map[wsPoolKey]*wsPoolEntry),
 		inFlight:    make(map[wsPoolKey]int),
-		unsupported: make(map[int]time.Time),
-		health:      make(map[int]*wsChannelHealth),
+		unsupported: make(map[string]time.Time),
+		health:      make(map[string]*wsChannelHealth),
 		stopCh:      make(chan struct{}),
 	}
 	go p.cleanupLoop()
@@ -310,12 +311,13 @@ func (p *wsPool) pruneExpiredLocked(key wsPoolKey, entry *wsPoolEntry, now time.
 	}
 }
 
-// IsUnsupported checks if a channel is known to not support WS.
-func (p *wsPool) IsUnsupported(channelID int) bool {
+// IsUnsupported checks if a channel endpoint is known to not support WS.
+// 键为 channelID+baseURLKey：某端点 404 只 gate 该端点，不波及渠道下其他端点。
+func (p *wsPool) IsUnsupported(channelID int, baseURLKey string) bool {
 	p.unsupportedMu.RLock()
 	defer p.unsupportedMu.RUnlock()
 
-	t, ok := p.unsupported[channelID]
+	t, ok := p.unsupported[wsEndpointKey(channelID, baseURLKey)]
 	if !ok {
 		return false
 	}
@@ -323,49 +325,56 @@ func (p *wsPool) IsUnsupported(channelID int) bool {
 	return time.Since(t) < 30*time.Minute
 }
 
-// MarkUnsupported marks a channel as not supporting WS.
-func (p *wsPool) MarkUnsupported(channelID int) {
+// MarkUnsupported marks a channel endpoint as not supporting WS.
+func (p *wsPool) MarkUnsupported(channelID int, baseURLKey string) {
 	p.unsupportedMu.Lock()
 	defer p.unsupportedMu.Unlock()
-	p.unsupported[channelID] = time.Now()
+	p.unsupported[wsEndpointKey(channelID, baseURLKey)] = time.Now()
 }
 
-// ShouldSkipWS returns true if the channel is in a health backoff period
+// ShouldSkipWS returns true if the channel endpoint is in a health backoff period
 // due to recent consecutive WS failures (transient errors, not definitive unsupported).
-func (p *wsPool) ShouldSkipWS(channelID int) bool {
+func (p *wsPool) ShouldSkipWS(channelID int, baseURLKey string) bool {
 	p.healthMu.RLock()
 	defer p.healthMu.RUnlock()
 
-	h, ok := p.health[channelID]
+	h, ok := p.health[wsEndpointKey(channelID, baseURLKey)]
 	if !ok {
 		return false
 	}
 	return time.Now().Before(h.skipUntil)
 }
 
-// RecordWSFailure increments the consecutive failure count for a channel
+// RecordWSFailure increments the consecutive failure count for a channel endpoint
 // and sets an exponential backoff period during which WS attempts are skipped.
-func (p *wsPool) RecordWSFailure(channelID int) {
+func (p *wsPool) RecordWSFailure(channelID int, baseURLKey string) {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
 
-	h, ok := p.health[channelID]
+	key := wsEndpointKey(channelID, baseURLKey)
+	h, ok := p.health[key]
 	if !ok {
 		h = &wsChannelHealth{}
-		p.health[channelID] = h
+		p.health[key] = h
 	}
 	h.consecutiveFailures++
 	now := time.Now()
 	h.lastFailure = now
 	h.skipUntil = now.Add(wsFailureBackoff(h.consecutiveFailures))
-	log.Debugf("ws health: channel %d failure #%d, backoff until %v", channelID, h.consecutiveFailures, h.skipUntil.Format(time.TimeOnly))
+	log.Debugf("ws health: channel %d endpoint %s failure #%d, backoff until %v", channelID, baseURLKey, h.consecutiveFailures, h.skipUntil.Format(time.TimeOnly))
 }
 
-// RecordWSSuccess resets the failure counter for a channel after a successful WS stream.
-func (p *wsPool) RecordWSSuccess(channelID int) {
+// RecordWSSuccess resets the failure counter for a channel endpoint after a successful WS stream.
+func (p *wsPool) RecordWSSuccess(channelID int, baseURLKey string) {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
-	delete(p.health, channelID)
+	delete(p.health, wsEndpointKey(channelID, baseURLKey))
+}
+
+// wsEndpointKey 组合 channelID 与 baseURLKey 作为 WS health/unsupported 的键。
+// baseURLKey 为空时退化为纯 channel 键（兼容旧调用路径）。
+func wsEndpointKey(channelID int, baseURLKey string) string {
+	return fmt.Sprintf("%d\x00%s", channelID, baseURLKey)
 }
 
 // wsFailureBackoff returns the backoff duration based on consecutive failure count.
@@ -489,8 +498,8 @@ func shouldProxyUpstreamWSHeader(name string) bool {
 	return true
 }
 
-func newWSPoolKey(channelID, keyID int, headers http.Header) wsPoolKey {
-	return wsPoolKey{channelID: channelID, keyID: keyID, headerSig: wsHeaderSignature(headers)}
+func newWSPoolKey(channelID, keyID int, headers http.Header, baseURLKey string) wsPoolKey {
+	return wsPoolKey{channelID: channelID, keyID: keyID, headerSig: wsHeaderSignature(headers), baseURLKey: baseURLKey}
 }
 
 func wsHeaderSignature(headers http.Header) string {
@@ -738,16 +747,17 @@ func TryUpstreamWSWithPreference(ctx context.Context, channel *dbmodel.Channel, 
 	if channel == nil || wsUpstreamPool == nil {
 		return nil
 	}
-	if wsUpstreamPool.IsUnsupported(channel.ID) {
+	endpointKey := baseURLKey(baseUrl)
+	if wsUpstreamPool.IsUnsupported(channel.ID, endpointKey) {
 		return nil
 	}
-	if wsUpstreamPool.ShouldSkipWS(channel.ID) {
+	if wsUpstreamPool.ShouldSkipWS(channel.ID, endpointKey) {
 		log.Debugf("skipping upstream WS for channel %d (health backoff)", channel.ID)
 		return nil
 	}
 
 	headers := buildUpstreamWSHeaders(clientHeaders, channel, key)
-	poolKey := newWSPoolKey(channel.ID, keyID, headers)
+	poolKey := newWSPoolKey(channel.ID, keyID, headers, endpointKey)
 	redial := len(forceRedial) > 0 && forceRedial[0]
 
 	deadline := time.Now().Add(wsAcquireTimeout)
@@ -763,10 +773,10 @@ func TryUpstreamWSWithPreference(ctx context.Context, channel *dbmodel.Channel, 
 			if err != nil {
 				if unsupported {
 					log.Debugf("upstream WS dial failed for channel %d, marking unsupported: %v", channel.ID, err)
-					wsUpstreamPool.MarkUnsupported(channel.ID)
+					wsUpstreamPool.MarkUnsupported(channel.ID, endpointKey)
 				} else {
 					log.Debugf("upstream WS dial failed for channel %d: %v", channel.ID, err)
-					wsUpstreamPool.RecordWSFailure(channel.ID)
+					wsUpstreamPool.RecordWSFailure(channel.ID, endpointKey)
 				}
 				return nil
 			}
