@@ -47,6 +47,32 @@ describe("site model endpoint config", () => {
     });
   });
 
+  it("keeps custom API base URLs exact instead of inferring version prefixes", () => {
+    const baseURLs = [
+      "https://versionless.example",
+      "https://gateway.example/custom/prefix",
+      "https://signed.example/proxy?signature=a/+%2F&token=x/",
+    ];
+    const config: SiteModelEndpointConfig = {
+      default: {
+        source: "custom",
+        endpoint_set: {
+          base_url_mode: BaseUrlMode.Failover,
+          base_urls: baseURLs.map((url) => ({ url })),
+        },
+      },
+      route_overrides: [],
+    };
+
+    const normalized = normalizeSiteModelEndpointConfig(config);
+
+    expect(
+      normalized.default.source === "custom"
+        ? normalized.default.endpoint_set.base_urls.map(({ url }) => url)
+        : [],
+    ).toEqual(baseURLs);
+  });
+
   it("uses a complete protocol override before the custom default", () => {
     const config: SiteModelEndpointConfig = {
       default: {

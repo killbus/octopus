@@ -24,6 +24,10 @@ type EndpointURLListEditorProps<T extends EditableEndpoint> = {
   mode: BaseUrlMode;
   onChange: (endpoints: T[]) => void;
   createEndpoint: () => T;
+  label?: string;
+  urlLabel?: string;
+  placeholder?: string;
+  description?: string;
 };
 
 export function EndpointURLListEditor<T extends EditableEndpoint>({
@@ -32,9 +36,16 @@ export function EndpointURLListEditor<T extends EditableEndpoint>({
   mode,
   onChange,
   createEndpoint,
+  label,
+  urlLabel,
+  placeholder,
+  description,
 }: EndpointURLListEditorProps<T>) {
   const t = useTranslations("channel.form");
   const items = endpoints.length > 0 ? endpoints : [createEndpoint()];
+  const resolvedLabel = label ?? t("baseUrls");
+  const resolvedURLLabel = urlLabel ?? t("baseUrlUrl");
+  const resolvedPlaceholder = placeholder ?? resolvedURLLabel;
 
   const update = (index: number, patch: Partial<T>) => {
     onChange(items.map((item, current) => (current === index ? { ...item, ...patch } : item)));
@@ -43,8 +54,11 @@ export function EndpointURLListEditor<T extends EditableEndpoint>({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <label className="text-sm font-medium text-card-foreground">
-          {t("baseUrls")} {items.length > 0 ? `(${items.length})` : ""}
+        <label
+          htmlFor={`${idPrefix}-base-0`}
+          className="text-sm font-medium text-card-foreground"
+        >
+          {resolvedLabel} {items.length > 0 ? `(${items.length})` : ""}
         </label>
         <Button
           type="button"
@@ -57,20 +71,27 @@ export function EndpointURLListEditor<T extends EditableEndpoint>({
           {t("add")}
         </Button>
       </div>
+      {description ? (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {description}
+        </p>
+      ) : null}
       <div className="space-y-2">
         {items.map((endpoint, index) => (
           <div key={`${idPrefix}-baseurl-${index}`} className="flex items-center gap-2">
             <Input
               id={`${idPrefix}-base-${index}`}
+              aria-label={`${resolvedURLLabel} ${index + 1}`}
               type="url"
               value={endpoint.url}
               onChange={(event) => update(index, { url: event.target.value } as Partial<T>)}
-              placeholder={t("baseUrlUrl")}
+              placeholder={resolvedPlaceholder}
               required={index === 0}
               className="rounded-xl flex-1"
             />
             {mode === BaseUrlMode.Weighted ? (
               <Input
+                aria-label={`${t("baseUrlWeight")} ${index + 1}`}
                 type="number"
                 min={1}
                 value={endpoint.weight ?? 1}
@@ -88,6 +109,7 @@ export function EndpointURLListEditor<T extends EditableEndpoint>({
               disabled={items.length <= 1}
               className="h-8 w-8 p-0 rounded-xl text-muted-foreground hover:text-destructive disabled:opacity-40 hover:bg-transparent"
               title={t("remove")}
+              aria-label={`${t("remove")} ${resolvedURLLabel} ${index + 1}`}
             >
               <X className="h-4 w-4" />
             </Button>

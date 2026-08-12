@@ -913,16 +913,30 @@
         }
     },
     "siteEndpoint": {
+        "title": "模型 API 出口",
+        "description": "配置模型 API 请求使用的出口地址与路由策略。",
         "defaultSource": "默认模型出口来源",
         "followSite": "跟随站点地址",
         "custom": "自定义模型出口",
+        "apiBaseUrls": "API Base URL（基础地址）",
+        "apiBaseUrl": "API Base URL",
+        "apiBaseUrlPlaceholder": "https://api.example.com/v1",
+        "apiBaseUrlDescription": "请填写精确的 API Base URL。Octopus 会在其后拼接各协议的操作路径；请包含上游要求的版本或代理前缀（例如 /v1），系统不会自动补齐。",
         "effectiveSource": "生效来源",
+        "effectivePreview": "各协议生效出口",
+        "inheritDefault": "继承默认",
+        "routeOverride": "协议覆盖",
+        "protocol": "协议",
         "protocolOverrides": "协议覆盖",
         "overrideDescription": "每项覆盖都会完整替换该协议的默认出口集合。",
         "addOverride": "添加覆盖",
-        "completeReplacement": "协议覆盖（完整替换）",
+        "completeReplacement": "完整替换默认出口集合。",
         "removeOverride": "移除覆盖",
-        "allInheritDefault": "当前所有协议均继承默认出口集合。"
+        "allInheritDefault": "当前所有协议均继承默认出口集合。",
+        "confirmBaseURLTitle": "确认迁移模型出口",
+        "confirmBaseURLDescription": "修改站点地址会同时改变以下继承站点地址的协议。继续前请核对原出口与新出口。",
+        "confirmBaseURLCancel": "返回编辑",
+        "confirmBaseURLAction": "确认迁移"
     },
     "siteChannel": {
         "card": {

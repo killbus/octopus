@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { useTranslations } from 'next-intl';
 import { Plus, X, XIcon } from 'lucide-react';
 import {
@@ -9,6 +9,16 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import {
     Select,
     SelectContent,
@@ -39,6 +49,7 @@ import {
     getFollowSiteBaseURLChangeImpact,
     normalizeSiteModelEndpointConfig,
     type CustomHeader,
+    type FollowSiteBaseURLImpact,
     type SiteModelEndpointConfig,
     type SiteModelRouteType,
     useCreateSite,
@@ -48,7 +59,10 @@ import {
 import type { ProxyMode } from '@/api/endpoints/proxy-pool';
 import { BaseUrlMode } from '@/api/endpoints/channel';
 import { translateSiteMessage } from './site-message';
-import { SiteEndpointConfigEditor } from './SiteEndpointConfigEditor';
+import {
+    SITE_MODEL_ROUTE_OPTIONS,
+    SiteEndpointConfigEditor,
+} from './SiteEndpointConfigEditor';
 
 type SiteFormState = {
     name: string;
@@ -230,10 +244,15 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
     const [siteForm, setSiteForm] = useState<SiteFormState>(() =>
         site ? createSiteForm(site) : createEmptySiteForm(),
     );
+    const formRef = useRef<HTMLFormElement>(null);
+    const confirmationBypassRef = useRef(false);
+    const [followSiteImpacts, setFollowSiteImpacts] = useState<FollowSiteBaseURLImpact[]>([]);
 
     const handleSubmit = useCallback(
         async (event: FormEvent<HTMLFormElement>) => {
             event.preventDefault();
+            const bypassFollowSiteConfirmation = confirmationBypassRef.current;
+            confirmationBypassRef.current = false;
 
             if (!siteForm.name.trim()) {
                 toast.error('请输入站点名称');
@@ -295,15 +314,9 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                     site.accounts ?? [],
                     site.default_route_type || siteForm.default_route_type,
                 );
-                if (impacts.length > 0) {
-                    const message = [
-                        '修改站点地址会同时迁移以下 FollowSite 模型出口：',
-                        ...impacts.map((impact) =>
-                            `${impact.route_type}: ${impact.previous_url} → ${impact.next_url}`,
-                        ),
-                        '确认继续吗？',
-                    ].join('\n');
-                    if (!window.confirm(message)) return;
+                if (impacts.length > 0 && !bypassFollowSiteConfirmation) {
+                    setFollowSiteImpacts(impacts);
+                    return;
                 }
             }
 
@@ -365,10 +378,16 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
     );
 
     const isPending = createSite.isPending || updateSite.isPending || detectPlatform.isPending;
+    const confirmFollowSiteBaseURLChange = () => {
+        confirmationBypassRef.current = true;
+        setFollowSiteImpacts([]);
+        formRef.current?.requestSubmit();
+    };
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent
+        <>
+            <Dialog open={open} onOpenChange={onOpenChange}>
+                <DialogContent
                 showCloseButton={false}
                 className="w-screen max-w-full md:max-w-xl bg-card text-card-foreground px-6 py-4 rounded-3xl flex flex-col gap-0 border-0 sm:max-w-xl h-[min(90dvh,52rem)] overflow-hidden"
             >
@@ -388,7 +407,7 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                     </button>
                 </header>
 
-                <form className="flex flex-1 min-h-0 flex-col" onSubmit={handleSubmit}>
+                <form ref={formRef} className="flex flex-1 min-h-0 flex-col" onSubmit={handleSubmit}>
                     <div className="flex-1 min-h-0 space-y-5 overflow-y-auto px-1">
                         <div className="grid gap-4 md:grid-cols-2">
                             <label className="grid gap-2 text-sm">
@@ -495,6 +514,24 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                                 </Select>
                             </div>
                         )}
+
+                        <section className="space-y-3">
+                            <div>
+                                <h3 className="text-sm font-semibold text-card-foreground">
+                                    {t('siteEndpoint.title')}
+                                </h3>
+                                <p className="text-xs text-muted-foreground">
+                                    {t('siteEndpoint.description')}
+                                </p>
+                            </div>
+                            <SiteEndpointConfigEditor
+                                config={siteForm.model_endpoint_config}
+                                baseURL={siteForm.base_url}
+                                onChange={(model_endpoint_config) =>
+                                    setSiteForm((current) => ({ ...current, model_endpoint_config }))
+                                }
+                            />
+                        </section>
 
                         <label className="grid gap-2 text-sm">
                             <span className="font-medium">手动签到 URL</span>
@@ -642,13 +679,6 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                                             ))}
                                         </div>
                                     </div>
-                                    <SiteEndpointConfigEditor
-                                        config={siteForm.model_endpoint_config}
-                                        baseURL={siteForm.base_url}
-                                        onChange={(model_endpoint_config) =>
-                                            setSiteForm((current) => ({ ...current, model_endpoint_config }))
-                                        }
-                                    />
                                 </AccordionContent>
                             </AccordionItem>
                         </Accordion>
@@ -672,7 +702,52 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                         </Button>
                     </footer>
                 </form>
-            </DialogContent>
-        </Dialog>
+                </DialogContent>
+            </Dialog>
+            <AlertDialog
+                open={followSiteImpacts.length > 0}
+                onOpenChange={(nextOpen) => {
+                    if (!nextOpen) setFollowSiteImpacts([]);
+                }}
+            >
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>{t('siteEndpoint.confirmBaseURLTitle')}</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {t('siteEndpoint.confirmBaseURLDescription')}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <div className="max-h-64 space-y-2 overflow-y-auto">
+                        {followSiteImpacts.map((impact) => (
+                            <div
+                                key={impact.route_type}
+                                className="rounded-lg border bg-muted/30 px-3 py-2 text-xs"
+                            >
+                                <div className="font-medium text-foreground">
+                                    {SITE_MODEL_ROUTE_OPTIONS.find(
+                                        (option) => option.value === impact.route_type,
+                                    )?.label ?? impact.route_type}
+                                </div>
+                                <div className="mt-1 break-all text-muted-foreground">
+                                    {impact.previous_url}
+                                </div>
+                                <div className="mt-1 break-all text-foreground">
+                                    <span aria-hidden="true">→ </span>
+                                    {impact.next_url}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel>
+                            {t('siteEndpoint.confirmBaseURLCancel')}
+                        </AlertDialogCancel>
+                        <AlertDialogAction onClick={confirmFollowSiteBaseURLChange}>
+                            {t('siteEndpoint.confirmBaseURLAction')}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+        </>
     );
 }

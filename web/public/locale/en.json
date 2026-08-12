@@ -913,16 +913,30 @@
         }
     },
     "siteEndpoint": {
+        "title": "Model API endpoints",
+        "description": "Configure the outbound endpoints and routing strategy used for model API requests.",
         "defaultSource": "Default model endpoint source",
         "followSite": "Follow site address",
         "custom": "Custom model endpoints",
+        "apiBaseUrls": "API Base URLs",
+        "apiBaseUrl": "API Base URL",
+        "apiBaseUrlPlaceholder": "https://api.example.com/v1",
+        "apiBaseUrlDescription": "Enter the exact API Base URL. Octopus appends the operation path for each protocol. Include any version or proxy prefix required by the upstream (for example, /v1). Octopus does not add it automatically.",
         "effectiveSource": "Effective source",
+        "effectivePreview": "Effective endpoints by protocol",
+        "inheritDefault": "Inherits default",
+        "routeOverride": "Protocol override",
+        "protocol": "Protocol",
         "protocolOverrides": "Protocol overrides",
         "overrideDescription": "Each override completely replaces the default endpoint set for that protocol.",
         "addOverride": "Add override",
-        "completeReplacement": "Protocol override (complete replacement)",
+        "completeReplacement": "Completely replaces the default endpoint set.",
         "removeOverride": "Remove override",
-        "allInheritDefault": "All protocols currently inherit the default endpoint set."
+        "allInheritDefault": "All protocols currently inherit the default endpoint set.",
+        "confirmBaseURLTitle": "Confirm model endpoint migration",
+        "confirmBaseURLDescription": "Changing the site address also changes the following protocols that inherit the site address. Review the old and new endpoints before continuing.",
+        "confirmBaseURLCancel": "Back to editing",
+        "confirmBaseURLAction": "Confirm migration"
     },
     "siteChannel": {
         "card": {
