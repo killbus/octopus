@@ -12,6 +12,25 @@ import (
 	"gorm.io/gorm"
 )
 
+// SiteValidationError marks a site update failure caused by client-provided
+// state. Its message intentionally remains the underlying validation message
+// so API compatibility is preserved while handlers can distinguish it from
+// persistence failures.
+type SiteValidationError struct {
+	Err error
+}
+
+func (e *SiteValidationError) Error() string {
+	return e.Err.Error()
+}
+
+func newSiteValidationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &SiteValidationError{Err: err}
+}
+
 func SiteList(ctx context.Context) ([]model.Site, error) {
 	var sites []model.Site
 	if err := db.GetDB().WithContext(ctx).
@@ -81,6 +100,17 @@ func normalizeSiteProxyFields(site *model.Site) {
 	for i := range site.Accounts {
 		normalizeSiteAccountProxyFields(&site.Accounts[i])
 	}
+	prepareSiteEndpointCompatibilityFields(site)
+}
+
+func prepareSiteEndpointCompatibilityFields(site *model.Site) {
+	if site == nil {
+		return
+	}
+	site.RouteBaseURLs = model.SiteRouteBaseURLsFromModelEndpointConfig(site.ModelEndpointConfig)
+	site.RouteBaseURLsSet = false
+	site.ModelEndpointConfigSet = false
+	site.ModelEndpointConfigNull = false
 }
 
 func normalizeSiteAccountProxyFields(account *model.SiteAccount) {
@@ -116,15 +146,37 @@ func SiteCreate(site *model.Site, ctx context.Context) error {
 			return tx.Model(&model.Site{}).Where("id = ?", site.ID).Update("enabled", false).Error
 		})
 		site.Enabled = false
+		if err == nil {
+			prepareSiteEndpointCompatibilityFields(site)
+		}
 		return err
 	}
-	return db.GetDB().WithContext(ctx).Create(site).Error
+	if err := db.GetDB().WithContext(ctx).Create(site).Error; err != nil {
+		return err
+	}
+	prepareSiteEndpointCompatibilityFields(site)
+	return nil
 }
 
 func SiteUpdate(req *model.SiteUpdateRequest, ctx context.Context) (*model.Site, error) {
 	if req == nil {
 		return nil, fmt.Errorf("site update request is nil")
 	}
+	modelEndpointTouched := req.ModelEndpointConfigSet || req.ModelEndpointConfig != nil
+	legacyEndpointTouched := req.RouteBaseURLsSet || req.RouteBaseURLs != nil
+	if modelEndpointTouched && legacyEndpointTouched {
+		return nil, newSiteValidationError(fmt.Errorf("model_endpoint_config and route_base_urls must not be provided together"))
+	}
+	if req.ModelEndpointConfigNull {
+		return nil, newSiteValidationError(fmt.Errorf("model endpoint config must not be null"))
+	}
+	if modelEndpointTouched && req.ModelEndpointConfig == nil {
+		return nil, newSiteValidationError(fmt.Errorf("model endpoint config is required"))
+	}
+	if legacyEndpointTouched && req.RouteBaseURLs == nil {
+		return nil, newSiteValidationError(fmt.Errorf("route base urls are required"))
+	}
+
 	var site model.Site
 	if err := db.GetDB().WithContext(ctx).First(&site, req.ID).Error; err != nil {
 		return nil, fmt.Errorf("site not found")
@@ -133,6 +185,7 @@ func SiteUpdate(req *model.SiteUpdateRequest, ctx context.Context) (*model.Site,
 	merged := site
 	var selectFields []string
 	updates := model.Site{ID: req.ID}
+	modelEndpointChanged := false
 
 	if req.Name != nil {
 		merged.Name = *req.Name
@@ -182,9 +235,22 @@ func SiteUpdate(req *model.SiteUpdateRequest, ctx context.Context) (*model.Site,
 		merged.CustomHeader = *req.CustomHeader
 		selectFields = append(selectFields, "custom_header")
 	}
-	if req.RouteBaseURLs != nil {
-		merged.RouteBaseURLs = *req.RouteBaseURLs
-		selectFields = append(selectFields, "route_base_urls")
+	if modelEndpointTouched {
+		merged.ModelEndpointConfig = *req.ModelEndpointConfig
+		merged.ModelEndpointConfigSet = true
+		merged.RouteBaseURLs = nil
+		modelEndpointChanged = true
+		selectFields = append(selectFields, "model_endpoint_config")
+	} else if legacyEndpointTouched {
+		legacy := model.NormalizeSiteRouteBaseURLs(*req.RouteBaseURLs)
+		currentLegacy := model.SiteRouteBaseURLsFromModelEndpointConfig(merged.ModelEndpointConfig)
+		merged.RouteBaseURLs = legacy
+		if !model.LegacySiteRouteBaseURLsEquivalent(legacy, currentLegacy) {
+			legacyConfig := model.SiteModelEndpointConfigFromLegacy(legacy)
+			merged.ModelEndpointConfig.RouteOverrides = legacyConfig.RouteOverrides
+			modelEndpointChanged = true
+			selectFields = append(selectFields, "model_endpoint_config")
+		}
 	}
 	if req.Tags != nil {
 		merged.Tags = *req.Tags
@@ -192,11 +258,11 @@ func SiteUpdate(req *model.SiteUpdateRequest, ctx context.Context) (*model.Site,
 	}
 	if len(selectFields) > 0 {
 		if err := merged.Validate(); err != nil {
-			return nil, err
+			return nil, newSiteValidationError(err)
 		}
 		if merged.ProxyMode == model.ProxyUsageModePool && merged.ProxyConfigID != nil {
 			if _, err := ProxyURLForConfig(*merged.ProxyConfigID, ctx); err != nil {
-				return nil, err
+				return nil, newSiteValidationError(err)
 			}
 		}
 	}
@@ -233,8 +299,8 @@ func SiteUpdate(req *model.SiteUpdateRequest, ctx context.Context) (*model.Site,
 	if req.CustomHeader != nil {
 		updates.CustomHeader = merged.CustomHeader
 	}
-	if req.RouteBaseURLs != nil {
-		updates.RouteBaseURLs = merged.RouteBaseURLs
+	if modelEndpointChanged {
+		updates.ModelEndpointConfig = merged.ModelEndpointConfig
 	}
 	if req.Tags != nil {
 		updates.Tags = merged.Tags

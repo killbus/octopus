@@ -856,6 +856,7 @@
         },
         "form": {
             "add": "Add",
+            "remove": "Remove",
             "name": "Channel Name",
             "type": "Channel Type",
             "baseUrls": "Base URLs",
@@ -910,6 +911,18 @@
             "matchRegexPlaceholder": "Optional: regex pattern to match request model names",
             "remark": "Remark"
         }
+    },
+    "siteEndpoint": {
+        "defaultSource": "Default model endpoint source",
+        "followSite": "Follow site address",
+        "custom": "Custom model endpoints",
+        "effectiveSource": "Effective source",
+        "protocolOverrides": "Protocol overrides",
+        "overrideDescription": "Each override completely replaces the default endpoint set for that protocol.",
+        "addOverride": "Add override",
+        "completeReplacement": "Protocol override (complete replacement)",
+        "removeOverride": "Remove override",
+        "allInheritDefault": "All protocols currently inherit the default endpoint set."
     },
     "siteChannel": {
         "card": {

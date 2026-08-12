@@ -252,6 +252,17 @@ func DBImportIncremental(ctx context.Context, dump *model.DBDump) (*model.DBImpo
 			site.ID = 0
 			site.Accounts = nil
 			remapProxyConfigID(&site.ProxyMode, &site.ProxyConfigID, proxyConfigIDMap)
+			if site.ModelEndpointConfig.Default.Source == "" && len(site.RouteBaseURLs) > 0 {
+				site.ModelEndpointConfig = model.SiteModelEndpointConfigFromLegacy(site.RouteBaseURLs)
+			}
+			site.ModelEndpointConfig = model.NormalizeSiteModelEndpointConfig(site.ModelEndpointConfig)
+			if err := model.ValidateSiteModelEndpointConfig(site.ModelEndpointConfig); err != nil {
+				return fmt.Errorf("import sites: site %d model endpoint config is invalid: %w", oldID, err)
+			}
+			site.RouteBaseURLs = nil
+			site.RouteBaseURLsSet = false
+			site.ModelEndpointConfigSet = false
+			site.ModelEndpointConfigNull = false
 
 			// Preserve the path in base_url (e.g. https://opencode.ai/zen/v1):
 			// native backups already hold full, canonical URLs. Only trim like

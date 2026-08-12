@@ -856,6 +856,7 @@
         },
         "form": {
             "add": "添加",
+            "remove": "移除",
             "name": "渠道名称",
             "type": "渠道类型",
             "baseUrls": "Base URLs",
@@ -910,6 +911,18 @@
             "matchRegexPlaceholder": "可选：用于匹配请求模型名称的正则表达式",
             "remark": "备注"
         }
+    },
+    "siteEndpoint": {
+        "defaultSource": "默认模型出口来源",
+        "followSite": "跟随站点地址",
+        "custom": "自定义模型出口",
+        "effectiveSource": "生效来源",
+        "protocolOverrides": "协议覆盖",
+        "overrideDescription": "每项覆盖都会完整替换该协议的默认出口集合。",
+        "addOverride": "添加覆盖",
+        "completeReplacement": "协议覆盖（完整替换）",
+        "removeOverride": "移除覆盖",
+        "allInheritDefault": "当前所有协议均继承默认出口集合。"
     },
     "siteChannel": {
         "card": {

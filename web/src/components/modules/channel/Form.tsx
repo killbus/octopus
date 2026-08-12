@@ -63,6 +63,7 @@ import {
     AccordionItem,
     AccordionTrigger,
 } from "@/components/ui/accordion";
+import { EndpointModeSelect, EndpointURLListEditor } from "./EndpointSetEditor";
 
 export function ChannelForm({
     formData,
@@ -188,24 +189,6 @@ export function ChannelForm({
         onFormDataChange({ ...formData, keys: next });
     };
 
-    const handleAddBaseUrl = () => {
-        onFormDataChange({
-            ...formData,
-            base_urls: [...(formData.base_urls ?? []), { url: '', delay: 0 }],
-        });
-    };
-
-    const handleUpdateBaseUrl = (idx: number, patch: Partial<Channel['base_urls'][number]>) => {
-        const next = (formData.base_urls ?? []).map((u, i) => (i === idx ? { ...u, ...patch } : u));
-        onFormDataChange({ ...formData, base_urls: next });
-    };
-
-    const handleRemoveBaseUrl = (idx: number) => {
-        const curr = formData.base_urls ?? [];
-        if (curr.length <= 1) return;
-        onFormDataChange({ ...formData, base_urls: curr.filter((_, i) => i !== idx) });
-    };
-
     const handleAddHeader = () => {
         onFormDataChange({
             ...formData,
@@ -264,60 +247,13 @@ export function ChannelForm({
                 </div>
             </div>
 
-            <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                    <label className="text-sm font-medium text-card-foreground">
-                        {t('baseUrls')} {formData.base_urls.length > 0 ? `(${formData.base_urls.length})` : ''}
-                    </label>
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={handleAddBaseUrl}
-                        className="h-6 px-2 text-xs text-muted-foreground/70 hover:text-muted-foreground hover:bg-transparent"
-                    >
-                        <Plus className="h-3 w-3 mr-1" />
-                        {t('add')}
-                    </Button>
-                </div>
-                <div className="space-y-2">
-                    {(formData.base_urls ?? []).map((u, idx) => (
-                        <div key={`baseurl-${idx}`} className="flex items-center gap-2">
-                            <Input
-                                id={`${idPrefix}-base-${idx}`}
-                                type="url"
-                                value={u.url}
-                                onChange={(e) => handleUpdateBaseUrl(idx, { url: e.target.value })}
-                                placeholder={t('baseUrlUrl')}
-                                required={idx === 0}
-                                className="rounded-xl flex-1"
-                            />
-                            {formData.base_url_mode === BaseUrlMode.Weighted ? (
-                                <Input
-                                    type="number"
-                                    min={1}
-                                    value={u.weight ?? 1}
-                                    onChange={(e) => handleUpdateBaseUrl(idx, { weight: Number(e.target.value) || 1 })}
-                                    placeholder={t('baseUrlWeight')}
-                                    className="rounded-xl w-20"
-                                    title="Weight"
-                                />
-                            ) : null}
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleRemoveBaseUrl(idx)}
-                                disabled={(formData.base_urls ?? []).length <= 1}
-                                className="h-8 w-8 p-0 rounded-xl text-muted-foreground hover:text-destructive disabled:opacity-40 hover:bg-transparent"
-                                title="Remove"
-                            >
-                                <X className="h-4 w-4" />
-                            </Button>
-                        </div>
-                    ))}
-                </div>
-            </div>
+            <EndpointURLListEditor
+                idPrefix={idPrefix}
+                endpoints={formData.base_urls ?? []}
+                mode={formData.base_url_mode}
+                createEndpoint={() => ({ url: '', delay: 0 })}
+                onChange={(base_urls) => onFormDataChange({ ...formData, base_urls })}
+            />
 
             <div className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -489,25 +425,11 @@ export function ChannelForm({
                     </AccordionTrigger>
                     <AccordionContent className="pt-4 px-4 pb-4 space-y-4 border-t">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                                <label htmlFor={`${idPrefix}-base-url-mode`} className="text-sm font-medium text-card-foreground">
-                                    {t('baseUrlMode')}
-                                </label>
-                                <Select
-                                    value={String(formData.base_url_mode ?? BaseUrlMode.Delay)}
-                                    onValueChange={(value) => onFormDataChange({ ...formData, base_url_mode: Number(value) as BaseUrlMode })}
-                                >
-                                    <SelectTrigger id={`${idPrefix}-base-url-mode`} className="rounded-xl w-full border border-border px-4 py-2 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                                        <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent className='rounded-xl'>
-                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Delay)}>{t('baseUrlModeDelay')}</SelectItem>
-                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Failover)}>{t('baseUrlModeFailover')}</SelectItem>
-                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Random)}>{t('baseUrlModeRandom')}</SelectItem>
-                                        <SelectItem className='rounded-xl' value={String(BaseUrlMode.Weighted)}>{t('baseUrlModeWeighted')}</SelectItem>
-                                    </SelectContent>
-                                </Select>
-                            </div>
+                            <EndpointModeSelect
+                                idPrefix={idPrefix}
+                                value={formData.base_url_mode}
+                                onChange={(base_url_mode) => onFormDataChange({ ...formData, base_url_mode })}
+                            />
                             {formData.type === ChannelType.OpenAIResponse ? (
                                 <div className="space-y-2">
                                     <label htmlFor={`${idPrefix}-ws-mode`} className="text-sm font-medium text-card-foreground">

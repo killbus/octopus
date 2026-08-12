@@ -9,7 +9,7 @@ import (
 	"github.com/bestruirui/octopus/internal/transformer/outbound"
 )
 
-func TestShouldSplitByOutboundTypeForcesSplitWhenRouteBaseURLsConfigured(t *testing.T) {
+func TestShouldSplitByOutboundTypeForcesSplitWhenEndpointOverridesConfigured(t *testing.T) {
 	tests := []struct {
 		name           string
 		site           *model.Site
@@ -19,9 +19,9 @@ func TestShouldSplitByOutboundTypeForcesSplitWhenRouteBaseURLsConfigured(t *test
 		{
 			name: "api platform without route overrides - no split",
 			site: &model.Site{
-				Platform:      model.SitePlatformAPI,
-				BaseURL:       "https://api.openai.com",
-				RouteBaseURLs: []model.SiteRouteBaseURL{},
+				Platform:            model.SitePlatformAPI,
+				BaseURL:             "https://api.openai.com",
+				ModelEndpointConfig: model.FollowSiteModelEndpointConfig(),
 			},
 			expectedSplit:  false,
 			expectedReason: "api platform defaults to no split",
@@ -31,10 +31,10 @@ func TestShouldSplitByOutboundTypeForcesSplitWhenRouteBaseURLsConfigured(t *test
 			site: &model.Site{
 				Platform: model.SitePlatformAPI,
 				BaseURL:  "https://gateway.example.com",
-				RouteBaseURLs: []model.SiteRouteBaseURL{
-					{RouteType: model.SiteModelRouteTypeAnthropic, BaseURL: "https://gateway.example.com/anthropic/v1"},
-					{RouteType: model.SiteModelRouteTypeOpenAIChat, BaseURL: "https://gateway.example.com/openai/v1"},
-				},
+				ModelEndpointConfig: testSiteModelEndpointConfig(
+					testSiteRouteEndpoint(model.SiteModelRouteTypeAnthropic, "https://gateway.example.com/anthropic/v1"),
+					testSiteRouteEndpoint(model.SiteModelRouteTypeOpenAIChat, "https://gateway.example.com/openai/v1"),
+				),
 			},
 			expectedSplit:  true,
 			expectedReason: "route overrides force split even on api platform",
@@ -44,9 +44,9 @@ func TestShouldSplitByOutboundTypeForcesSplitWhenRouteBaseURLsConfigured(t *test
 			site: &model.Site{
 				Platform: model.SitePlatformAPI,
 				BaseURL:  "https://gateway.example.com",
-				RouteBaseURLs: []model.SiteRouteBaseURL{
-					{RouteType: model.SiteModelRouteTypeAnthropic, BaseURL: "https://gateway.example.com/anthropic/v1"},
-				},
+				ModelEndpointConfig: testSiteModelEndpointConfig(
+					testSiteRouteEndpoint(model.SiteModelRouteTypeAnthropic, "https://gateway.example.com/anthropic/v1"),
+				),
 			},
 			expectedSplit:  true,
 			expectedReason: "route overrides force split even on api platform",
@@ -54,10 +54,10 @@ func TestShouldSplitByOutboundTypeForcesSplitWhenRouteBaseURLsConfigured(t *test
 		{
 			name: "api platform without route overrides (gemini default) - no split",
 			site: &model.Site{
-				Platform:         model.SitePlatformAPI,
-				DefaultRouteType: model.SiteModelRouteTypeGemini,
-				BaseURL:          "https://gemini.example.com",
-				RouteBaseURLs:    []model.SiteRouteBaseURL{},
+				Platform:            model.SitePlatformAPI,
+				DefaultRouteType:    model.SiteModelRouteTypeGemini,
+				BaseURL:             "https://gemini.example.com",
+				ModelEndpointConfig: model.FollowSiteModelEndpointConfig(),
 			},
 			expectedSplit:  false,
 			expectedReason: "api platform defaults to no split",
@@ -65,9 +65,9 @@ func TestShouldSplitByOutboundTypeForcesSplitWhenRouteBaseURLsConfigured(t *test
 		{
 			name: "new-api platform without route overrides - splits by default",
 			site: &model.Site{
-				Platform:      model.SitePlatformNewAPI,
-				BaseURL:       "https://newapi.example.com",
-				RouteBaseURLs: []model.SiteRouteBaseURL{},
+				Platform:            model.SitePlatformNewAPI,
+				BaseURL:             "https://newapi.example.com",
+				ModelEndpointConfig: model.FollowSiteModelEndpointConfig(),
 			},
 			expectedSplit:  true,
 			expectedReason: "new-api family platforms split by default",
@@ -77,9 +77,9 @@ func TestShouldSplitByOutboundTypeForcesSplitWhenRouteBaseURLsConfigured(t *test
 			site: &model.Site{
 				Platform: model.SitePlatformNewAPI,
 				BaseURL:  "https://newapi.example.com",
-				RouteBaseURLs: []model.SiteRouteBaseURL{
-					{RouteType: model.SiteModelRouteTypeAnthropic, BaseURL: "https://newapi.example.com/anthropic/v1"},
-				},
+				ModelEndpointConfig: testSiteModelEndpointConfig(
+					testSiteRouteEndpoint(model.SiteModelRouteTypeAnthropic, "https://newapi.example.com/anthropic/v1"),
+				),
 			},
 			expectedSplit:  true,
 			expectedReason: "route overrides reinforce default split behavior",
@@ -104,10 +104,10 @@ func TestProjectAccountWithRouteOverridesOnOpenAIPlatform(t *testing.T) {
 		Platform: model.SitePlatformAPI,
 		BaseURL:  "https://gateway.example.com",
 		Enabled:  true,
-		RouteBaseURLs: []model.SiteRouteBaseURL{
-			{RouteType: model.SiteModelRouteTypeAnthropic, BaseURL: "https://gateway.example.com/anthropic/v1"},
-			{RouteType: model.SiteModelRouteTypeOpenAIChat, BaseURL: "https://gateway.example.com/openai/v1"},
-		},
+		ModelEndpointConfig: testSiteModelEndpointConfig(
+			testSiteRouteEndpoint(model.SiteModelRouteTypeAnthropic, "https://gateway.example.com/anthropic/v1"),
+			testSiteRouteEndpoint(model.SiteModelRouteTypeOpenAIChat, "https://gateway.example.com/openai/v1"),
+		),
 	}
 	if err := op.SiteCreate(site, ctx); err != nil {
 		t.Fatalf("SiteCreate failed: %v", err)
@@ -147,7 +147,7 @@ func TestProjectAccountWithRouteOverridesOnOpenAIPlatform(t *testing.T) {
 	}
 
 	if len(channelIDs) != 2 {
-		t.Fatalf("expected 2 managed channels (split by route type due to RouteBaseURLs), got %d", len(channelIDs))
+		t.Fatalf("expected 2 managed channels split by endpoint overrides, got %d", len(channelIDs))
 	}
 
 	channelsByGroup := loadProjectedChannelsByGroupKey(t, ctx, account.ID)

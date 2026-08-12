@@ -2,8 +2,10 @@ package op
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	dbpkg "github.com/bestruirui/octopus/internal/db"
@@ -61,6 +63,33 @@ func TestDBImportPreservesAllAccountsOnCleanDB(t *testing.T) {
 	}
 	if len(site.Accounts) != 3 {
 		t.Fatalf("expected site to have 3 accounts, got %d", len(site.Accounts))
+	}
+}
+
+func TestDBImportConvertsLegacySiteEndpointConfig(t *testing.T) {
+	ctx := setupBackupTestDB(t)
+	dump := buildTestDump()
+	dump.Sites[0].RouteBaseURLs = []model.SiteRouteBaseURL{
+		{
+			RouteType: model.SiteModelRouteTypeAnthropic,
+			BaseURL:   "https://legacy.example/anthropic///?signature=a/+%2F&key=x/",
+		},
+	}
+
+	if _, err := DBImportIncremental(ctx, dump); err != nil {
+		t.Fatalf("DBImportIncremental failed: %v", err)
+	}
+
+	var site model.Site
+	if err := dbpkg.GetDB().Where("platform = ? AND base_url = ?", model.SitePlatformNewAPI, "https://example.com").First(&site).Error; err != nil {
+		t.Fatalf("query imported site failed: %v", err)
+	}
+	if site.ModelEndpointConfig.Default.Source != model.SiteModelEndpointSourceFollowSite || len(site.ModelEndpointConfig.RouteOverrides) != 1 {
+		t.Fatalf("imported endpoint config = %#v", site.ModelEndpointConfig)
+	}
+	gotURL := site.ModelEndpointConfig.RouteOverrides[0].EndpointSet.BaseURLs[0].URL
+	if wantURL := "https://legacy.example/anthropic?signature=a/+%2F&key=x/"; gotURL != wantURL {
+		t.Fatalf("imported endpoint url = %q, want %q", gotURL, wantURL)
 	}
 }
 
@@ -210,6 +239,18 @@ func TestDBExportThenImportRoundtrip(t *testing.T) {
 		Platform: model.SitePlatformNewAPI,
 		BaseURL:  "https://roundtrip.example.com",
 		Enabled:  true,
+		ModelEndpointConfig: model.SiteModelEndpointConfig{
+			Default: model.SiteModelEndpointDefault{
+				Source: model.SiteModelEndpointSourceCustom,
+				EndpointSet: &model.SiteEndpointSet{
+					BaseURLMode: model.BaseUrlModeWeighted,
+					BaseURLs: []model.SiteModelEndpoint{
+						{URL: "https://primary.example/v1?api_key=a/+%2F", Weight: 3},
+						{URL: "https://backup.example/v1?api_key=b", Weight: 1},
+					},
+				},
+			},
+		},
 	}
 	if err := SiteCreate(site, ctx); err != nil {
 		t.Fatalf("SiteCreate failed: %v", err)
@@ -232,6 +273,16 @@ func TestDBExportThenImportRoundtrip(t *testing.T) {
 	dump, err := DBExportAll(ctx, false, false)
 	if err != nil {
 		t.Fatalf("DBExportAll failed: %v", err)
+	}
+	encodedDump, err := json.Marshal(dump)
+	if err != nil {
+		t.Fatalf("marshal exported dump: %v", err)
+	}
+	if strings.Contains(string(encodedDump), `"route_base_urls"`) {
+		t.Fatalf("new backup unexpectedly contains legacy route_base_urls: %s", encodedDump)
+	}
+	if !strings.Contains(string(encodedDump), `"model_endpoint_config"`) {
+		t.Fatalf("new backup is missing model_endpoint_config: %s", encodedDump)
 	}
 
 	// Verify export contains all accounts
@@ -269,6 +320,13 @@ func TestDBExportThenImportRoundtrip(t *testing.T) {
 	}
 	if accountCount != 5 {
 		t.Fatalf("expected 5 accounts for imported site, got %d", accountCount)
+	}
+	set := freshSite.ModelEndpointConfig.Default.EndpointSet
+	if freshSite.ModelEndpointConfig.Default.Source != model.SiteModelEndpointSourceCustom || set == nil || set.BaseURLMode != model.BaseUrlModeWeighted || len(set.BaseURLs) != 2 {
+		t.Fatalf("round-tripped endpoint config = %#v", freshSite.ModelEndpointConfig)
+	}
+	if set.BaseURLs[0].URL != "https://primary.example/v1?api_key=a/+%2F" || set.BaseURLs[0].Weight != 3 {
+		t.Fatalf("round-tripped primary endpoint = %#v", set.BaseURLs[0])
 	}
 }
 

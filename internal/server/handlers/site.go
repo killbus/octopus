@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -155,6 +156,11 @@ func updateSite(c *gin.Context) {
 	}
 	site, err := op.SiteUpdate(&req, c.Request.Context())
 	if err != nil {
+		var validationErr *op.SiteValidationError
+		if errors.As(err, &validationErr) {
+			resp.Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return
 	}

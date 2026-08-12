@@ -19,8 +19,8 @@ const (
 	SitePlatformOneAPI    SitePlatform = "one-api"
 	SitePlatformOneHub    SitePlatform = "one-hub"
 	SitePlatformDoneHub   SitePlatform = "done-hub"
-	SitePlatformSub2API SitePlatform = "sub2api"
-	SitePlatformAPI     SitePlatform = "api"
+	SitePlatformSub2API   SitePlatform = "sub2api"
+	SitePlatformAPI       SitePlatform = "api"
 )
 
 type SiteCredentialType string
@@ -90,26 +90,6 @@ type SiteRouteBaseURL struct {
 	BaseURL   string             `json:"base_url"`
 }
 
-// ResolveRouteBaseURL returns the per-route base URL override for routeType,
-// trimmed of trailing slashes. The second return value reports whether a
-// usable (non-empty) override exists.
-func (s *Site) ResolveRouteBaseURL(routeType SiteModelRouteType) (string, bool) {
-	if s == nil {
-		return "", false
-	}
-	for _, item := range s.RouteBaseURLs {
-		if item.RouteType != routeType {
-			continue
-		}
-		trimmed := strings.TrimRight(strings.TrimSpace(item.BaseURL), "/")
-		if trimmed == "" {
-			return "", false
-		}
-		return trimmed, true
-	}
-	return "", false
-}
-
 // NormalizeSiteRouteBaseURLs trims values, drops entries with an empty base
 // URL or route type, and keeps the first entry per route type.
 func NormalizeSiteRouteBaseURLs(items []SiteRouteBaseURL) []SiteRouteBaseURL {
@@ -120,7 +100,7 @@ func NormalizeSiteRouteBaseURLs(items []SiteRouteBaseURL) []SiteRouteBaseURL {
 	result := make([]SiteRouteBaseURL, 0, len(items))
 	for _, item := range items {
 		routeType := SiteModelRouteType(strings.TrimSpace(string(item.RouteType)))
-		baseURL := strings.TrimRight(strings.TrimSpace(item.BaseURL), "/")
+		baseURL := NormalizeSiteModelEndpointURL(item.BaseURL)
 		if routeType == "" || baseURL == "" {
 			continue
 		}
@@ -157,28 +137,32 @@ func ValidateSiteRouteBaseURLs(items []SiteRouteBaseURL) error {
 }
 
 type Site struct {
-	ID                 int                `json:"id" gorm:"primaryKey"`
-	Name               string             `json:"name" gorm:"unique;not null"`
-	Platform           SitePlatform       `json:"platform" gorm:"type:varchar(32);not null"`
-	BaseURL            string             `json:"base_url" gorm:"not null"`
-	Enabled            bool               `json:"enabled" gorm:"default:true"`
-	EnabledSet         bool               `json:"-" gorm:"-"`
-	ProxyMode          ProxyUsageMode     `json:"proxy_mode" gorm:"type:varchar(16);not null;default:'direct'"`
-	ProxyConfigID      *int               `json:"proxy_config_id"`
-	Proxy              bool               `json:"-" gorm:"default:false"`
-	SiteProxy          *string            `json:"-" gorm:"column:site_proxy"`
-	UseSystemProxy     bool               `json:"-" gorm:"default:false"`
-	ExternalCheckinURL *string            `json:"external_checkin_url"`
-	IsPinned           bool               `json:"is_pinned" gorm:"default:false"`
-	SortOrder          int                `json:"sort_order" gorm:"default:0"`
-	GlobalWeight       float64            `json:"global_weight" gorm:"default:1"`
-	CustomHeader       []CustomHeader     `json:"custom_header" gorm:"serializer:json"`
-	RouteBaseURLs      []SiteRouteBaseURL `json:"route_base_urls" gorm:"serializer:json"`
-	DefaultRouteType   SiteModelRouteType `json:"default_route_type" gorm:"type:varchar(32);not null;default:''"`
-	Tags               []string           `json:"tags" gorm:"serializer:json"`
-	Archived           bool               `json:"archived" gorm:"default:false;index"`
-	ArchivedAt         *time.Time         `json:"archived_at"`
-	Accounts           []SiteAccount      `json:"accounts,omitempty" gorm:"foreignKey:SiteID"`
+	ID                      int                     `json:"id" gorm:"primaryKey"`
+	Name                    string                  `json:"name" gorm:"unique;not null"`
+	Platform                SitePlatform            `json:"platform" gorm:"type:varchar(32);not null"`
+	BaseURL                 string                  `json:"base_url" gorm:"not null"`
+	Enabled                 bool                    `json:"enabled" gorm:"default:true"`
+	EnabledSet              bool                    `json:"-" gorm:"-"`
+	ProxyMode               ProxyUsageMode          `json:"proxy_mode" gorm:"type:varchar(16);not null;default:'direct'"`
+	ProxyConfigID           *int                    `json:"proxy_config_id"`
+	Proxy                   bool                    `json:"-" gorm:"default:false"`
+	SiteProxy               *string                 `json:"-" gorm:"column:site_proxy"`
+	UseSystemProxy          bool                    `json:"-" gorm:"default:false"`
+	ExternalCheckinURL      *string                 `json:"external_checkin_url"`
+	IsPinned                bool                    `json:"is_pinned" gorm:"default:false"`
+	SortOrder               int                     `json:"sort_order" gorm:"default:0"`
+	GlobalWeight            float64                 `json:"global_weight" gorm:"default:1"`
+	CustomHeader            []CustomHeader          `json:"custom_header" gorm:"serializer:json"`
+	ModelEndpointConfig     SiteModelEndpointConfig `json:"model_endpoint_config" gorm:"serializer:json"`
+	ModelEndpointConfigSet  bool                    `json:"-" gorm:"-"`
+	ModelEndpointConfigNull bool                    `json:"-" gorm:"-"`
+	RouteBaseURLs           []SiteRouteBaseURL      `json:"route_base_urls,omitempty" gorm:"-"`
+	RouteBaseURLsSet        bool                    `json:"-" gorm:"-"`
+	DefaultRouteType        SiteModelRouteType      `json:"default_route_type" gorm:"type:varchar(32);not null;default:''"`
+	Tags                    []string                `json:"tags" gorm:"serializer:json"`
+	Archived                bool                    `json:"archived" gorm:"default:false;index"`
+	ArchivedAt              *time.Time              `json:"archived_at"`
+	Accounts                []SiteAccount           `json:"accounts,omitempty" gorm:"foreignKey:SiteID"`
 }
 
 func (s *Site) UnmarshalJSON(data []byte) error {
@@ -197,6 +181,16 @@ func (s *Site) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	_, s.EnabledSet = raw["enabled"]
+	if value, ok := raw["model_endpoint_config"]; ok {
+		s.ModelEndpointConfigSet = true
+		s.ModelEndpointConfigNull = string(value) == "null"
+	}
+	if _, ok := raw["route_base_urls"]; ok {
+		s.RouteBaseURLsSet = true
+	}
+	if !s.ModelEndpointConfigSet && s.RouteBaseURLsSet {
+		s.ModelEndpointConfig = SiteModelEndpointConfigFromLegacy(s.RouteBaseURLs)
+	}
 	if aux.Proxy != nil {
 		s.Proxy = *aux.Proxy
 	}
@@ -335,25 +329,29 @@ type SiteChannelBinding struct {
 }
 
 type SiteUpdateRequest struct {
-	ID                 int                 `json:"id" binding:"required"`
-	Name               *string             `json:"name,omitempty"`
-	Platform           *SitePlatform       `json:"platform,omitempty"`
-	BaseURL            *string             `json:"base_url,omitempty"`
-	Enabled            *bool               `json:"enabled,omitempty"`
-	ProxyMode          *ProxyUsageMode     `json:"proxy_mode,omitempty"`
-	ProxyConfigID      *int                `json:"proxy_config_id,omitempty"`
-	ProxyConfigIDSet   bool                `json:"-"`
-	Proxy              *bool               `json:"-"`
-	SiteProxy          *string             `json:"-"`
-	UseSystemProxy     *bool               `json:"-"`
-	ExternalCheckinURL *string             `json:"external_checkin_url,omitempty"`
-	ExternalCheckinSet bool                `json:"-"`
-	IsPinned           *bool               `json:"is_pinned,omitempty"`
-	SortOrder          *int                `json:"sort_order,omitempty"`
-	GlobalWeight       *float64            `json:"global_weight,omitempty"`
-	CustomHeader       *[]CustomHeader     `json:"custom_header,omitempty"`
-	RouteBaseURLs      *[]SiteRouteBaseURL `json:"route_base_urls,omitempty"`
-	Tags               *[]string           `json:"tags,omitempty"`
+	ID                      int                      `json:"id" binding:"required"`
+	Name                    *string                  `json:"name,omitempty"`
+	Platform                *SitePlatform            `json:"platform,omitempty"`
+	BaseURL                 *string                  `json:"base_url,omitempty"`
+	Enabled                 *bool                    `json:"enabled,omitempty"`
+	ProxyMode               *ProxyUsageMode          `json:"proxy_mode,omitempty"`
+	ProxyConfigID           *int                     `json:"proxy_config_id,omitempty"`
+	ProxyConfigIDSet        bool                     `json:"-"`
+	Proxy                   *bool                    `json:"-"`
+	SiteProxy               *string                  `json:"-"`
+	UseSystemProxy          *bool                    `json:"-"`
+	ExternalCheckinURL      *string                  `json:"external_checkin_url,omitempty"`
+	ExternalCheckinSet      bool                     `json:"-"`
+	IsPinned                *bool                    `json:"is_pinned,omitempty"`
+	SortOrder               *int                     `json:"sort_order,omitempty"`
+	GlobalWeight            *float64                 `json:"global_weight,omitempty"`
+	CustomHeader            *[]CustomHeader          `json:"custom_header,omitempty"`
+	ModelEndpointConfig     *SiteModelEndpointConfig `json:"model_endpoint_config,omitempty"`
+	ModelEndpointConfigSet  bool                     `json:"-"`
+	ModelEndpointConfigNull bool                     `json:"-"`
+	RouteBaseURLs           *[]SiteRouteBaseURL      `json:"route_base_urls,omitempty"`
+	RouteBaseURLsSet        bool                     `json:"-"`
+	Tags                    *[]string                `json:"tags,omitempty"`
 }
 
 func (r *SiteUpdateRequest) UnmarshalJSON(data []byte) error {
@@ -370,6 +368,13 @@ func (r *SiteUpdateRequest) UnmarshalJSON(data []byte) error {
 	}
 	_, r.ProxyConfigIDSet = raw["proxy_config_id"]
 	_, r.ExternalCheckinSet = raw["external_checkin_url"]
+	if value, ok := raw["model_endpoint_config"]; ok {
+		r.ModelEndpointConfigSet = true
+		r.ModelEndpointConfigNull = string(value) == "null"
+	}
+	if value, ok := raw["route_base_urls"]; ok && string(value) != "null" {
+		r.RouteBaseURLsSet = true
+	}
 	return nil
 }
 
@@ -878,6 +883,10 @@ func (s *Site) Normalize() {
 	}
 	s.Tags = NormalizeSiteTags(s.Tags)
 	s.RouteBaseURLs = NormalizeSiteRouteBaseURLs(s.RouteBaseURLs)
+	if s.ModelEndpointConfig.Default.Source == "" && len(s.RouteBaseURLs) > 0 {
+		s.ModelEndpointConfig = SiteModelEndpointConfigFromLegacy(s.RouteBaseURLs)
+	}
+	s.ModelEndpointConfig = NormalizeSiteModelEndpointConfig(s.ModelEndpointConfig)
 	s.normalizeLegacyAPIPlatform()
 }
 
@@ -912,6 +921,15 @@ func (s *Site) Validate() error {
 	if s == nil {
 		return fmt.Errorf("site is nil")
 	}
+	if s.ModelEndpointConfigNull {
+		return fmt.Errorf("model endpoint config must not be null")
+	}
+	if s.ModelEndpointConfigSet && s.RouteBaseURLsSet {
+		return fmt.Errorf("model_endpoint_config and route_base_urls must not be provided together")
+	}
+	if s.ModelEndpointConfigSet && strings.TrimSpace(string(s.ModelEndpointConfig.Default.Source)) == "" {
+		return fmt.Errorf("model endpoint source is required")
+	}
 	s.Normalize()
 	if s.Name == "" {
 		return fmt.Errorf("site name is required")
@@ -939,6 +957,9 @@ func (s *Site) Validate() error {
 		return fmt.Errorf("site base url must have a host")
 	}
 	if err := ValidateSiteRouteBaseURLs(s.RouteBaseURLs); err != nil {
+		return err
+	}
+	if err := ValidateSiteModelEndpointConfig(s.ModelEndpointConfig); err != nil {
 		return err
 	}
 	if s.ExternalCheckinURL != nil {

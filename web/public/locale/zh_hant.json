@@ -856,6 +856,7 @@
         },
         "form": {
             "add": "新增",
+            "remove": "移除",
             "name": "供應源名稱",
             "type": "供應源類型",
             "baseUrls": "Base URLs",
@@ -910,6 +911,18 @@
             "matchRegexPlaceholder": "可選：用於匹配請求模型名稱的正規表示式",
             "remark": "備註"
         }
+    },
+    "siteEndpoint": {
+        "defaultSource": "預設模型出口來源",
+        "followSite": "跟隨站點地址",
+        "custom": "自訂模型出口",
+        "effectiveSource": "生效來源",
+        "protocolOverrides": "協議覆蓋",
+        "overrideDescription": "每項覆蓋都會完整取代該協議的預設出口集合。",
+        "addOverride": "新增覆蓋",
+        "completeReplacement": "協議覆蓋（完整取代）",
+        "removeOverride": "移除覆蓋",
+        "allInheritDefault": "目前所有協議均繼承預設出口集合。"
     },
     "siteChannel": {
         "card": {

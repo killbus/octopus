@@ -624,8 +624,9 @@ func TestSiteUpdateMergesRouteBaseURLs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SiteGet failed: %v", err)
 	}
-	if got, ok := reloaded.ResolveRouteBaseURL(model.SiteModelRouteTypeAnthropic); !ok || got != "https://example.com/anthropic/v1" {
-		t.Fatalf("expected persisted anthropic override, got %q ok=%v", got, ok)
+	if len(reloaded.ModelEndpointConfig.RouteOverrides) != 1 ||
+		reloaded.ModelEndpointConfig.RouteOverrides[0].EndpointSet.BaseURLs[0].URL != "https://example.com/anthropic/v1" {
+		t.Fatalf("expected persisted anthropic override, got %#v", reloaded.ModelEndpointConfig)
 	}
 
 	// Clearing with an explicit empty slice removes the overrides.

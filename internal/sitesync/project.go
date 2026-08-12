@@ -16,12 +16,44 @@ import (
 	"gorm.io/gorm"
 )
 
+type siteModelEndpointSnapshot struct {
+	config        model.SiteModelEndpointConfig
+	followSiteURL string
+}
+
+func newSiteModelEndpointSnapshot(site *model.Site) (*siteModelEndpointSnapshot, error) {
+	if site == nil {
+		return nil, fmt.Errorf("site is nil")
+	}
+	config := site.ModelEndpointConfig
+	config = model.NormalizeSiteModelEndpointConfig(config)
+	if err := model.ValidateSiteModelEndpointConfig(config); err != nil {
+		return nil, err
+	}
+	return &siteModelEndpointSnapshot{
+		config:        config,
+		followSiteURL: buildProjectedChannelBaseURL(site),
+	}, nil
+}
+
+func (s *siteModelEndpointSnapshot) resolve(routeType model.SiteModelRouteType) model.SiteEndpointSet {
+	set, _ := model.ResolveSiteModelEndpointSet(s.config, routeType, s.followSiteURL)
+	return set
+}
+
 func ProjectAccount(ctx context.Context, accountID int) ([]int, error) {
 	siteRecord, account, err := loadSiteAccount(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
+	snapshot, err := newSiteModelEndpointSnapshot(siteRecord)
+	if err != nil {
+		return nil, err
+	}
+	return projectAccountWithSnapshot(ctx, siteRecord, account, snapshot)
+}
 
+func projectAccountWithSnapshot(ctx context.Context, siteRecord *model.Site, account *model.SiteAccount, endpointSnapshot *siteModelEndpointSnapshot) ([]int, error) {
 	if !siteRecord.Enabled || !account.Enabled {
 		bindings, err := listChannelBindingsByAccount(ctx, account.ID)
 		if err != nil {
@@ -125,7 +157,8 @@ func ProjectAccount(ctx context.Context, accountID int) ([]int, error) {
 				continue
 			}
 			obType := routeType.ToOutboundType()
-			baseUrls := []model.BaseUrl{{URL: resolveProjectedChannelBaseURL(siteRecord, routeType), Delay: 0}}
+			endpointSet := endpointSnapshot.resolve(routeType)
+			baseUrls := mergeProjectedBaseURLs(nil, endpointSet.BaseURLs)
 			modelNames := extractSiteModelNames(bucketModels)
 			bindingKey := compositeBindingKey(groupKey, obType, shouldSplit)
 			channelPayload := model.Channel{
@@ -133,7 +166,7 @@ func ProjectAccount(ctx context.Context, accountID int) ([]int, error) {
 				Type:          obType,
 				Enabled:       enabled,
 				BaseUrls:      baseUrls,
-				BaseUrlMode:   model.BaseUrlModeDelay,
+				BaseUrlMode:   endpointSet.BaseURLMode,
 				Keys:          buildChannelKeys(groupTokens, siteRecord.Platform),
 				Model:         strings.Join(modelNames, ","),
 				CustomModel:   "",
@@ -202,7 +235,8 @@ func ProjectAccount(ctx context.Context, accountID int) ([]int, error) {
 				continue
 			}
 
-			updateReq := &model.ChannelUpdateRequest{ID: existingChannel.ID, Name: &channelPayload.Name, Type: &channelPayload.Type, Enabled: &channelPayload.Enabled, BaseUrls: &channelPayload.BaseUrls, Model: &channelPayload.Model, CustomModel: &channelPayload.CustomModel, ProxyMode: &channelPayload.ProxyMode, ProxyConfigID: channelPayload.ProxyConfigID, AutoSync: &channelPayload.AutoSync, CustomHeader: &channelPayload.CustomHeader, BypassManagedCheck: true}
+			channelPayload.BaseUrls = mergeProjectedBaseURLs(existingChannel.BaseUrls, endpointSet.BaseURLs)
+			updateReq := &model.ChannelUpdateRequest{ID: existingChannel.ID, Name: &channelPayload.Name, Type: &channelPayload.Type, Enabled: &channelPayload.Enabled, BaseUrls: &channelPayload.BaseUrls, BaseUrlMode: &channelPayload.BaseUrlMode, Model: &channelPayload.Model, CustomModel: &channelPayload.CustomModel, ProxyMode: &channelPayload.ProxyMode, ProxyConfigID: channelPayload.ProxyConfigID, AutoSync: &channelPayload.AutoSync, CustomHeader: &channelPayload.CustomHeader, BypassManagedCheck: true}
 			updateReq.KeysToAdd, updateReq.KeysToUpdate, updateReq.KeysToDelete = diffManagedChannelKeys(existingChannel.Keys, channelPayload.Keys)
 			if _, err := op.ChannelUpdate(updateReq, ctx); err != nil {
 				return nil, fmt.Errorf("failed to update managed channel: %w", err)
@@ -341,8 +375,13 @@ func ProjectSite(ctx context.Context, siteID int) error {
 	if err != nil {
 		return err
 	}
-	for _, account := range siteRecord.Accounts {
-		if _, err := ProjectAccount(ctx, account.ID); err != nil {
+	snapshot, err := newSiteModelEndpointSnapshot(siteRecord)
+	if err != nil {
+		return err
+	}
+	for i := range siteRecord.Accounts {
+		account := &siteRecord.Accounts[i]
+		if _, err := projectAccountWithSnapshot(ctx, siteRecord, account, snapshot); err != nil {
 			return err
 		}
 	}
@@ -395,26 +434,39 @@ func buildProjectedChannelBaseURL(siteRecord *model.Site) string {
 		return ""
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(siteRecord.BaseURL), "/")
+	baseURL := model.NormalizeSiteModelEndpointURL(siteRecord.BaseURL)
 	if baseURL == "" {
 		return ""
 	}
-	if strings.HasSuffix(strings.ToLower(baseURL), "/v1") {
+	queryIndex := strings.IndexByte(baseURL, '?')
+	pathEnd := len(baseURL)
+	if queryIndex >= 0 {
+		pathEnd = queryIndex
+	}
+	path, suffix := baseURL[:pathEnd], baseURL[pathEnd:]
+	if strings.HasSuffix(strings.ToLower(path), "/v1") {
 		return baseURL
 	}
-	return baseURL + "/v1"
+	return path + "/v1" + suffix
 }
 
-// resolveProjectedChannelBaseURL returns the base URL for a projected channel
-// of the given route type. A per-route override on the site (RouteBaseURLs)
-// wins and is used verbatim; otherwise the default site base URL handling
-// (with the "/v1" convention) applies. This lets one upstream expose different
-// protocols under different path prefixes.
-func resolveProjectedChannelBaseURL(siteRecord *model.Site, routeType model.SiteModelRouteType) string {
-	if override, ok := siteRecord.ResolveRouteBaseURL(routeType); ok {
-		return override
+func mergeProjectedBaseURLs(existing []model.BaseUrl, configured []model.SiteModelEndpoint) []model.BaseUrl {
+	delayByURL := make(map[string]int, len(existing))
+	for _, item := range existing {
+		if _, exists := delayByURL[item.URL]; exists {
+			continue
+		}
+		delayByURL[item.URL] = item.Delay
 	}
-	return buildProjectedChannelBaseURL(siteRecord)
+	result := make([]model.BaseUrl, 0, len(configured))
+	for _, endpoint := range configured {
+		result = append(result, model.BaseUrl{
+			URL:    endpoint.URL,
+			Delay:  delayByURL[endpoint.URL],
+			Weight: endpoint.Weight,
+		})
+	}
+	return result
 }
 
 // isUsableSiteToken reports whether a token can produce a projected channel
@@ -540,7 +592,7 @@ func platformOutboundType(site *model.Site) outbound.OutboundType {
 // shouldSplitByOutboundType 判断是否需要按模型端点格式拆分 Channel
 // 当站点配置了协议路径覆盖时，强制启用拆分以确保每个协议使用正确的 base URL
 func shouldSplitByOutboundType(site *model.Site) bool {
-	if site != nil && len(site.RouteBaseURLs) > 0 {
+	if siteHasRouteEndpointOverrides(site) {
 		return true
 	}
 	return model.ShouldSplitSiteChannelRoutes(site.Platform)
@@ -770,7 +822,7 @@ func shouldSplitForAccount(account *model.SiteAccount, site *model.Site) bool {
 	}
 
 	// 优先级 1: 站点配置了协议路径覆盖，强制拆分
-	if len(site.RouteBaseURLs) > 0 {
+	if siteHasRouteEndpointOverrides(site) {
 		return true
 	}
 
@@ -806,4 +858,11 @@ func shouldSplitForAccount(account *model.SiteAccount, site *model.Site) bool {
 
 	// 所有手动覆盖都与平台默认相同，不需要拆分
 	return false
+}
+
+func siteHasRouteEndpointOverrides(site *model.Site) bool {
+	if site == nil {
+		return false
+	}
+	return model.HasSiteModelEndpointOverrides(site.ModelEndpointConfig)
 }

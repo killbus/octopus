@@ -3,6 +3,7 @@ import { apiClient, API_BASE_URL } from "../client";
 import { logger } from "@/lib/logger";
 import { useAuthStore } from "./user";
 import type { ProxyMode } from "./proxy-pool";
+import { BaseUrlMode } from "./channel";
 
 export enum SitePlatform {
   NewAPI = "new-api",
@@ -29,6 +30,125 @@ export type SiteRouteBaseURL = {
   route_type: string;
   base_url: string;
 };
+
+export type SiteModelRouteType =
+  | "openai_chat"
+  | "openai_response"
+  | "anthropic"
+  | "gemini"
+  | "volcengine"
+  | "openai_embedding";
+
+export type SiteModelEndpoint = {
+  url: string;
+  weight?: number;
+};
+
+export type SiteEndpointSet = {
+  base_urls: SiteModelEndpoint[];
+  base_url_mode: BaseUrlMode;
+};
+
+export type SiteRouteEndpointSet = {
+  route_type: SiteModelRouteType;
+  endpoint_set: SiteEndpointSet;
+};
+
+export type SiteModelEndpointConfig = {
+  default:
+    | { source: "follow_site"; endpoint_set?: never }
+    | { source: "custom"; endpoint_set: SiteEndpointSet };
+  route_overrides: SiteRouteEndpointSet[];
+};
+
+export type ResolvedSiteEndpointSet = {
+  source: "follow_site" | "default_custom" | "route_override";
+  endpoint_set: SiteEndpointSet;
+};
+
+export function followSiteModelEndpointConfig(): SiteModelEndpointConfig {
+  return { default: { source: "follow_site" }, route_overrides: [] };
+}
+
+export function deriveFollowSiteModelURL(baseURL: string): string {
+  const value = baseURL.trim();
+  const queryIndex = value.indexOf("?");
+  const pathEnd = queryIndex >= 0 ? queryIndex : value.length;
+  const path = value.slice(0, pathEnd).replace(/\/+$/, "");
+  const suffix = value.slice(pathEnd);
+  return `${path.toLowerCase().endsWith("/v1") ? path : `${path}/v1`}${suffix}`;
+}
+
+export function cloneSiteEndpointSet(set: SiteEndpointSet): SiteEndpointSet {
+  return {
+    base_url_mode: set.base_url_mode,
+    base_urls: set.base_urls.map((endpoint) => ({ ...endpoint })),
+  };
+}
+
+export function normalizeSiteModelEndpointConfig(
+  config: SiteModelEndpointConfig | null | undefined,
+): SiteModelEndpointConfig {
+  if (!config) return followSiteModelEndpointConfig();
+  const normalizeSet = (set: SiteEndpointSet): SiteEndpointSet => ({
+    base_url_mode: set.base_url_mode ?? BaseUrlMode.Delay,
+    base_urls: (set.base_urls ?? []).map((endpoint) => ({
+      url: endpoint.url,
+      ...(set.base_url_mode === BaseUrlMode.Weighted
+        ? { weight: endpoint.weight ?? 1 }
+        : {}),
+    })),
+  });
+  return {
+    default:
+      config.default.source === "custom"
+        ? {
+            source: "custom",
+            endpoint_set: normalizeSet(config.default.endpoint_set),
+          }
+        : { source: "follow_site" },
+    route_overrides: (config.route_overrides ?? []).map((override) => ({
+      route_type: override.route_type,
+      endpoint_set: normalizeSet(override.endpoint_set),
+    })),
+  };
+}
+
+export function resolveSiteDefaultEndpointSet(
+  config: SiteModelEndpointConfig,
+  baseURL: string,
+): ResolvedSiteEndpointSet {
+  if (config.default.source === "custom") {
+    return {
+      source: "default_custom",
+      endpoint_set: cloneSiteEndpointSet(config.default.endpoint_set),
+    };
+  }
+  return {
+    source: "follow_site",
+    endpoint_set: {
+      base_url_mode: BaseUrlMode.Delay,
+      base_urls: [{ url: deriveFollowSiteModelURL(baseURL) }],
+    },
+  };
+}
+
+export function resolveSiteEndpointSet(
+  config: SiteModelEndpointConfig,
+  routeType: SiteModelRouteType,
+  baseURL: string,
+): ResolvedSiteEndpointSet {
+  const override = config.route_overrides.find(
+    (item) => item.route_type === routeType,
+  );
+  if (override) {
+    return {
+      source: "route_override",
+      endpoint_set: cloneSiteEndpointSet(override.endpoint_set),
+    };
+  }
+  return resolveSiteDefaultEndpointSet(config, baseURL);
+}
 
 export type SiteToken = {
   id: number;
@@ -67,6 +187,7 @@ export type SiteModel = {
   site_account_id: number;
   model_name: string;
   source: string;
+  route_type?: SiteModelRouteType;
 };
 
 export type SiteChannelBinding = {
@@ -128,8 +249,9 @@ export type Site = {
   global_weight: number;
   custom_header: CustomHeader[];
   route_base_urls: SiteRouteBaseURL[];
+  model_endpoint_config: SiteModelEndpointConfig;
   tags: string[];
-  default_route_type?: string;
+  default_route_type?: SiteModelRouteType;
   archived: boolean;
   archived_at?: string | null;
   accounts: SiteAccount[];
@@ -152,9 +274,49 @@ type SiteServer = Omit<
   > | null;
   custom_header: CustomHeader[] | null;
   route_base_urls: SiteRouteBaseURL[] | null;
+  model_endpoint_config: SiteModelEndpointConfig | null;
   tags: string[] | null;
-  default_route_type?: string | null;
+  default_route_type?: SiteModelRouteType | null;
 };
+
+export type FollowSiteBaseURLImpact = {
+  route_type: SiteModelRouteType;
+  previous_url: string;
+  next_url: string;
+};
+
+export function getFollowSiteBaseURLChangeImpact(
+  config: SiteModelEndpointConfig,
+  currentBaseURL: string,
+  nextBaseURL: string,
+  accounts: ReadonlyArray<{
+    models?: ReadonlyArray<{ route_type?: SiteModelRouteType }> | null;
+  }>,
+  fallbackRouteType: SiteModelRouteType,
+): FollowSiteBaseURLImpact[] {
+  if (config.default.source !== "follow_site") return [];
+  const previousURL = deriveFollowSiteModelURL(currentBaseURL);
+  const nextURL = deriveFollowSiteModelURL(nextBaseURL);
+  if (previousURL === nextURL) return [];
+
+  const overridden = new Set(
+    config.route_overrides.map((item) => item.route_type),
+  );
+  const affected = new Set<SiteModelRouteType>();
+  for (const account of accounts) {
+    for (const item of account.models ?? []) {
+      const routeType = item.route_type ?? fallbackRouteType;
+      if (!overridden.has(routeType)) affected.add(routeType);
+    }
+  }
+  return Array.from(affected)
+    .sort()
+    .map((routeType) => ({
+      route_type: routeType,
+      previous_url: previousURL,
+      next_url: nextURL,
+    }));
+}
 
 export type SiteSyncResult = {
   account_id: number;
@@ -234,6 +396,9 @@ function normalizeSiteServerList(data: SiteServer[]): Site[] {
     ...site,
     custom_header: site.custom_header ?? [],
     route_base_urls: site.route_base_urls ?? [],
+    model_endpoint_config: normalizeSiteModelEndpointConfig(
+      site.model_endpoint_config,
+    ),
     tags: site.tags ?? [],
     default_route_type: site.default_route_type ?? undefined,
     proxy_mode: site.proxy_mode ?? "direct",
@@ -323,7 +488,10 @@ export function useCreateSite() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (
-      data: Omit<Site, "id" | "accounts" | "archived" | "archived_at">,
+      data: Omit<
+        Site,
+        "id" | "accounts" | "archived" | "archived_at" | "route_base_urls"
+      >,
     ) => apiClient.post<Site>("/api/v1/site/create", data),
     onSuccess: () => invalidateSiteQueries(queryClient),
     onError: (error) => logger.error("站点创建失败:", error),
@@ -334,7 +502,9 @@ export function useUpdateSite() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (
-      data: Partial<Omit<Site, "accounts">> & { id: number },
+      data: Partial<Omit<Site, "accounts" | "route_base_urls">> & {
+        id: number;
+      },
     ) => apiClient.post<Site>("/api/v1/site/update", data),
     onSuccess: () => invalidateSiteQueries(queryClient),
     onError: (error) => logger.error("站点更新失败:", error),
@@ -621,7 +791,10 @@ export function useImportMetAPI() {
 export function useDetectSitePlatform() {
   return useMutation({
     mutationFn: async (url: string) =>
-      apiClient.post<{ platform: string; default_route_type?: string }>("/api/v1/site/detect", { url }),
+      apiClient.post<{
+        platform: string;
+        default_route_type?: SiteModelRouteType;
+      }>("/api/v1/site/detect", { url }),
     onError: (error) => logger.error("平台检测失败:", error),
   });
 }

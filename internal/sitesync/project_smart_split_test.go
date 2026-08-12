@@ -15,13 +15,13 @@ func TestShouldSplitForAccount(t *testing.T) {
 		reason   string
 	}{
 		{
-			name: "API platform with RouteBaseURLs forces split",
+			name: "API platform with endpoint overrides forces split",
 			site: &model.Site{
 				Platform: model.SitePlatformAPI,
-				RouteBaseURLs: []model.SiteRouteBaseURL{
-					{RouteType: model.SiteModelRouteTypeOpenAIChat, BaseURL: "https://example.com/v1"},
-					{RouteType: model.SiteModelRouteTypeAnthropic, BaseURL: "https://example.com/claude"},
-				},
+				ModelEndpointConfig: testSiteModelEndpointConfig(
+					testSiteRouteEndpoint(model.SiteModelRouteTypeOpenAIChat, "https://example.com/v1"),
+					testSiteRouteEndpoint(model.SiteModelRouteTypeAnthropic, "https://example.com/claude"),
+				),
 			},
 			account: &model.SiteAccount{
 				Models: []model.SiteModel{

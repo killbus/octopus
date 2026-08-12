@@ -71,30 +71,6 @@ func TestNormalizeSiteSyncTokenValueForPlatform(t *testing.T) {
 	}
 }
 
-func TestResolveRouteBaseURL(t *testing.T) {
-	site := &Site{
-		BaseURL: "https://example.com",
-		RouteBaseURLs: []SiteRouteBaseURL{
-			{RouteType: SiteModelRouteTypeAnthropic, BaseURL: "https://example.com/anthropic/v1/"},
-			{RouteType: SiteModelRouteTypeGemini, BaseURL: "   "},
-		},
-	}
-
-	if got, ok := site.ResolveRouteBaseURL(SiteModelRouteTypeAnthropic); !ok || got != "https://example.com/anthropic/v1" {
-		t.Fatalf("expected anthropic override trimmed, got %q ok=%v", got, ok)
-	}
-	if _, ok := site.ResolveRouteBaseURL(SiteModelRouteTypeGemini); ok {
-		t.Fatalf("expected blank override to be treated as absent")
-	}
-	if _, ok := site.ResolveRouteBaseURL(SiteModelRouteTypeOpenAIResponse); ok {
-		t.Fatalf("expected missing route type to have no override")
-	}
-	var nilSite *Site
-	if _, ok := nilSite.ResolveRouteBaseURL(SiteModelRouteTypeAnthropic); ok {
-		t.Fatalf("expected nil site to have no override")
-	}
-}
-
 func TestNormalizeSiteRouteBaseURLs(t *testing.T) {
 	items := []SiteRouteBaseURL{
 		{RouteType: SiteModelRouteTypeAnthropic, BaseURL: "  https://example.com/anthropic/v1/  "},

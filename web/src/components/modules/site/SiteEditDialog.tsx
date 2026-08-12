@@ -35,14 +35,20 @@ import { useSettingStore } from '@/stores/setting';
 import {
     Site as SiteRecord,
     SitePlatform,
+    followSiteModelEndpointConfig,
+    getFollowSiteBaseURLChangeImpact,
+    normalizeSiteModelEndpointConfig,
     type CustomHeader,
-    type SiteRouteBaseURL,
+    type SiteModelEndpointConfig,
+    type SiteModelRouteType,
     useCreateSite,
     useDetectSitePlatform,
     useUpdateSite,
 } from '@/api/endpoints/site';
 import type { ProxyMode } from '@/api/endpoints/proxy-pool';
+import { BaseUrlMode } from '@/api/endpoints/channel';
 import { translateSiteMessage } from './site-message';
+import { SiteEndpointConfigEditor } from './SiteEndpointConfigEditor';
 
 type SiteFormState = {
     name: string;
@@ -56,23 +62,14 @@ type SiteFormState = {
     sort_order: number;
     global_weight: number;
     custom_header: CustomHeader[];
-    route_base_urls: SiteRouteBaseURL[];
+    model_endpoint_config: SiteModelEndpointConfig;
     tags: string[];
-    default_route_type: string;
+    default_route_type: SiteModelRouteType;
 };
 
 const AUTO_DETECT_VALUE = '__auto__';
 
-const ROUTE_BASE_URL_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-    { value: 'openai_chat', label: 'OpenAI Chat' },
-    { value: 'openai_response', label: 'OpenAI Responses' },
-    { value: 'anthropic', label: 'Anthropic Messages' },
-    { value: 'gemini', label: 'Gemini' },
-    { value: 'volcengine', label: 'Volcengine' },
-    { value: 'openai_embedding', label: 'OpenAI Embedding' },
-];
-
-const DEFAULT_ROUTE_TYPE_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+const DEFAULT_ROUTE_TYPE_OPTIONS: ReadonlyArray<{ value: SiteModelRouteType; label: string }> = [
     { value: 'openai_chat', label: 'OpenAI Chat' },
     { value: 'anthropic', label: 'Anthropic' },
     { value: 'gemini', label: 'Gemini' },
@@ -101,7 +98,7 @@ function createEmptySiteForm(): SiteFormState {
         sort_order: 0,
         global_weight: 1,
         custom_header: [{ header_key: '', header_value: '' }],
-        route_base_urls: [],
+        model_endpoint_config: followSiteModelEndpointConfig(),
         tags: [],
         default_route_type: 'openai_chat',
     };
@@ -122,7 +119,7 @@ function createSiteForm(site: SiteRecord): SiteFormState {
         custom_header: site.custom_header.length > 0
             ? site.custom_header.map((item) => ({ ...item }))
             : [{ header_key: '', header_value: '' }],
-        route_base_urls: (site.route_base_urls ?? []).map((item) => ({ ...item })),
+        model_endpoint_config: normalizeSiteModelEndpointConfig(site.model_endpoint_config),
         tags: [...(site.tags ?? [])],
         default_route_type: site.default_route_type || 'openai_chat',
     };
@@ -133,6 +130,7 @@ function normalizeSiteRecord(site: SiteRecord): SiteRecord {
         ...site,
         custom_header: site.custom_header ?? [],
         route_base_urls: site.route_base_urls ?? [],
+        model_endpoint_config: normalizeSiteModelEndpointConfig(site.model_endpoint_config),
         tags: site.tags ?? [],
         proxy_mode: site.proxy_mode ?? 'direct',
         proxy_config_id: site.proxy_config_id ?? null,
@@ -160,13 +158,44 @@ function trimHeaders(items: CustomHeader[]) {
         .filter((item) => item.header_key || item.header_value);
 }
 
-function trimRouteBaseURLs(items: SiteRouteBaseURL[]) {
-    return items
-        .map((item) => ({
-            route_type: item.route_type.trim(),
-            base_url: item.base_url.trim().replace(/\/+$/, ''),
-        }))
-        .filter((item) => item.route_type || item.base_url);
+function prepareModelEndpointConfig(config: SiteModelEndpointConfig): SiteModelEndpointConfig {
+    const normalized = normalizeSiteModelEndpointConfig(config);
+    const prepareSet = (set: typeof normalized.route_overrides[number]['endpoint_set']) => ({
+        ...set,
+        base_urls: set.base_urls.map((endpoint) => ({
+            url: endpoint.url.trim(),
+            ...(set.base_url_mode === BaseUrlMode.Weighted
+                ? { weight: Number(endpoint.weight) || 1 }
+                : {}),
+        })),
+    });
+    return {
+        default: normalized.default.source === 'custom'
+            ? { source: 'custom', endpoint_set: prepareSet(normalized.default.endpoint_set) }
+            : { source: 'follow_site' },
+        route_overrides: normalized.route_overrides.map((override) => ({
+            route_type: override.route_type,
+            endpoint_set: prepareSet(override.endpoint_set),
+        })),
+    };
+}
+
+function validateModelEndpointConfig(config: SiteModelEndpointConfig): string | null {
+    const sets = [
+        ...(config.default.source === 'custom' ? [config.default.endpoint_set] : []),
+        ...config.route_overrides.map((override) => override.endpoint_set),
+    ];
+    if (sets.some((set) => set.base_urls.length === 0 || set.base_urls.some((endpoint) => !endpoint.url))) {
+        return '模型出口集合至少需要一个有效 URL';
+    }
+    if (sets.some((set) => new Set(set.base_urls.map((endpoint) => endpoint.url)).size !== set.base_urls.length)) {
+        return '同一模型出口集合不能包含重复 URL';
+    }
+    const routeTypes = config.route_overrides.map((override) => override.route_type);
+    if (new Set(routeTypes).size !== routeTypes.length) {
+        return '同一协议只能配置一个完整覆盖';
+    }
+    return null;
 }
 
 function getErrorMessage(error: unknown) {
@@ -252,23 +281,30 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                 return;
             }
 
-            const routeBaseURLs = trimRouteBaseURLs(siteForm.route_base_urls);
-            const invalidRouteBaseURL = routeBaseURLs.find(
-                (item) => !item.route_type || !item.base_url,
-            );
-            if (invalidRouteBaseURL) {
-                toast.error('协议路径覆盖的类型和地址都不能为空');
+            const modelEndpointConfig = prepareModelEndpointConfig(siteForm.model_endpoint_config);
+            const endpointError = validateModelEndpointConfig(modelEndpointConfig);
+            if (endpointError) {
+                toast.error(endpointError);
                 return;
             }
-            const routeTypeSet = new Set<string>();
-            const duplicateRoute = routeBaseURLs.find((item) => {
-                if (routeTypeSet.has(item.route_type)) return true;
-                routeTypeSet.add(item.route_type);
-                return false;
-            });
-            if (duplicateRoute) {
-                toast.error('同一协议的路径覆盖只能配置一条');
-                return;
+            if (site) {
+                const impacts = getFollowSiteBaseURLChangeImpact(
+                    modelEndpointConfig,
+                    site.base_url,
+                    siteForm.base_url,
+                    site.accounts ?? [],
+                    site.default_route_type || siteForm.default_route_type,
+                );
+                if (impacts.length > 0) {
+                    const message = [
+                        '修改站点地址会同时迁移以下 FollowSite 模型出口：',
+                        ...impacts.map((impact) =>
+                            `${impact.route_type}: ${impact.previous_url} → ${impact.next_url}`,
+                        ),
+                        '确认继续吗？',
+                    ].join('\n');
+                    if (!window.confirm(message)) return;
+                }
             }
 
             if (siteForm.proxy_mode === 'pool' && !siteForm.proxy_config_id) {
@@ -289,7 +325,7 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                 sort_order: siteForm.sort_order,
                 global_weight: siteForm.global_weight,
                 custom_header: customHeader,
-                route_base_urls: routeBaseURLs,
+                model_endpoint_config: modelEndpointConfig,
                 tags: siteForm.tags,
                 default_route_type:
                     platform === SitePlatform.API ? defaultRouteType : undefined,
@@ -442,7 +478,7 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                                     onValueChange={(value) =>
                                         setSiteForm((current) => ({
                                             ...current,
-                                            default_route_type: value,
+                                            default_route_type: value as SiteModelRouteType,
                                         }))
                                     }
                                 >
@@ -606,98 +642,13 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                                             ))}
                                         </div>
                                     </div>
-                                    <div className="space-y-2">
-                                        <div className="flex items-center justify-between">
-                                            <label className="text-sm font-medium text-card-foreground">
-                                                协议路径覆盖 {siteForm.route_base_urls.length > 0 ? `(${siteForm.route_base_urls.length})` : ''}
-                                            </label>
-                                            <Button
-                                                type="button"
-                                                variant="ghost"
-                                                size="sm"
-                                                onClick={() =>
-                                                    setSiteForm((current) => ({
-                                                        ...current,
-                                                        route_base_urls: [
-                                                            ...current.route_base_urls,
-                                                            { route_type: '', base_url: '' },
-                                                        ],
-                                                    }))
-                                                }
-                                                className="h-6 px-2 text-xs text-muted-foreground/70 hover:bg-transparent hover:text-muted-foreground"
-                                            >
-                                                <Plus className="mr-1 h-3 w-3" />
-                                                添加
-                                            </Button>
-                                        </div>
-                                        <p className="text-xs text-muted-foreground/70">
-                                            按协议覆盖请求地址，例如 Anthropic 填 https://example.com/anthropic/v1，留空则用站点地址默认推断。
-                                        </p>
-                                        <div className="space-y-2">
-                                            {siteForm.route_base_urls.map((item, index) => (
-                                                <div key={`site-route-${index}`} className="flex items-center gap-2">
-                                                    <Select
-                                                        value={item.route_type || undefined}
-                                                        onValueChange={(value) =>
-                                                            setSiteForm((current) => ({
-                                                                ...current,
-                                                                route_base_urls: current.route_base_urls.map(
-                                                                    (route, routeIndex) =>
-                                                                        routeIndex === index
-                                                                            ? { ...route, route_type: value }
-                                                                            : route,
-                                                                ),
-                                                            }))
-                                                        }
-                                                    >
-                                                        <SelectTrigger className="w-40 rounded-xl">
-                                                            <SelectValue placeholder="协议类型" />
-                                                        </SelectTrigger>
-                                                        <SelectContent>
-                                                            {ROUTE_BASE_URL_OPTIONS.map((option) => (
-                                                                <SelectItem key={option.value} value={option.value}>
-                                                                    {option.label}
-                                                                </SelectItem>
-                                                            ))}
-                                                        </SelectContent>
-                                                    </Select>
-                                                    <Input
-                                                        value={item.base_url}
-                                                        onChange={(event) =>
-                                                            setSiteForm((current) => ({
-                                                                ...current,
-                                                                route_base_urls: current.route_base_urls.map(
-                                                                    (route, routeIndex) =>
-                                                                        routeIndex === index
-                                                                            ? { ...route, base_url: event.target.value }
-                                                                            : route,
-                                                                ),
-                                                            }))
-                                                        }
-                                                        placeholder="https://example.com/anthropic/v1"
-                                                        className="flex-1 rounded-xl"
-                                                    />
-                                                    <Button
-                                                        type="button"
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        onClick={() =>
-                                                            setSiteForm((current) => ({
-                                                                ...current,
-                                                                route_base_urls: current.route_base_urls.filter(
-                                                                    (_, routeIndex) => routeIndex !== index,
-                                                                ),
-                                                            }))
-                                                        }
-                                                        className="h-8 w-8 rounded-xl p-0 text-muted-foreground hover:bg-transparent hover:text-destructive disabled:opacity-40"
-                                                        title="Remove"
-                                                    >
-                                                        <X className="h-4 w-4" />
-                                                    </Button>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
+                                    <SiteEndpointConfigEditor
+                                        config={siteForm.model_endpoint_config}
+                                        baseURL={siteForm.base_url}
+                                        onChange={(model_endpoint_config) =>
+                                            setSiteForm((current) => ({ ...current, model_endpoint_config }))
+                                        }
+                                    />
                                 </AccordionContent>
                             </AccordionItem>
                         </Accordion>
