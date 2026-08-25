@@ -70,6 +70,10 @@ export function followSiteModelEndpointConfig(): SiteModelEndpointConfig {
   return { default: { source: "follow_site" }, route_overrides: [] };
 }
 
+/**
+ * @deprecated Use `getEffectiveModelBaseURL` instead. This function is kept
+ * only as a fallback for backends that do not return `effective_model_base_url`.
+ */
 export function deriveFollowSiteModelURL(baseURL: string): string {
   const value = baseURL.trim();
   const queryIndex = value.indexOf("?");
@@ -77,6 +81,13 @@ export function deriveFollowSiteModelURL(baseURL: string): string {
   const path = value.slice(0, pathEnd).replace(/\/+$/, "");
   const suffix = value.slice(pathEnd);
   return `${path.toLowerCase().endsWith("/v1") ? path : `${path}/v1`}${suffix}`;
+}
+
+export function getEffectiveModelBaseURL(
+  site: Pick<Site, "base_url" | "effective_model_base_url">,
+): string {
+  if (site.effective_model_base_url) return site.effective_model_base_url;
+  return deriveFollowSiteModelURL(site.base_url);
 }
 
 export function cloneSiteEndpointSet(set: SiteEndpointSet): SiteEndpointSet {
@@ -117,6 +128,7 @@ export function normalizeSiteModelEndpointConfig(
 export function resolveSiteDefaultEndpointSet(
   config: SiteModelEndpointConfig,
   baseURL: string,
+  effectiveModelBaseURL?: string,
 ): ResolvedSiteEndpointSet {
   if (config.default.source === "custom") {
     return {
@@ -128,7 +140,7 @@ export function resolveSiteDefaultEndpointSet(
     source: "follow_site",
     endpoint_set: {
       base_url_mode: BaseUrlMode.Delay,
-      base_urls: [{ url: deriveFollowSiteModelURL(baseURL) }],
+      base_urls: [{ url: effectiveModelBaseURL ?? deriveFollowSiteModelURL(baseURL) }],
     },
   };
 }
@@ -137,6 +149,7 @@ export function resolveSiteEndpointSet(
   config: SiteModelEndpointConfig,
   routeType: SiteModelRouteType,
   baseURL: string,
+  effectiveModelBaseURL?: string,
 ): ResolvedSiteEndpointSet {
   const override = config.route_overrides.find(
     (item) => item.route_type === routeType,
@@ -147,7 +160,7 @@ export function resolveSiteEndpointSet(
       endpoint_set: cloneSiteEndpointSet(override.endpoint_set),
     };
   }
-  return resolveSiteDefaultEndpointSet(config, baseURL);
+  return resolveSiteDefaultEndpointSet(config, baseURL, effectiveModelBaseURL);
 }
 
 export type SiteToken = {
@@ -252,6 +265,7 @@ export type Site = {
   model_endpoint_config: SiteModelEndpointConfig;
   tags: string[];
   default_route_type?: SiteModelRouteType;
+  effective_model_base_url?: string;
   archived: boolean;
   archived_at?: string | null;
   accounts: SiteAccount[];
@@ -277,6 +291,7 @@ type SiteServer = Omit<
   model_endpoint_config: SiteModelEndpointConfig | null;
   tags: string[] | null;
   default_route_type?: SiteModelRouteType | null;
+  effective_model_base_url?: string;
 };
 
 export type FollowSiteBaseURLImpact = {
@@ -293,9 +308,10 @@ export function getFollowSiteBaseURLChangeImpact(
     models?: ReadonlyArray<{ route_type?: SiteModelRouteType }> | null;
   }>,
   fallbackRouteType: SiteModelRouteType,
+  effectiveModelBaseURL?: string,
 ): FollowSiteBaseURLImpact[] {
   if (config.default.source !== "follow_site") return [];
-  const previousURL = deriveFollowSiteModelURL(currentBaseURL);
+  const previousURL = effectiveModelBaseURL ?? deriveFollowSiteModelURL(currentBaseURL);
   const nextURL = deriveFollowSiteModelURL(nextBaseURL);
   if (previousURL === nextURL) return [];
 

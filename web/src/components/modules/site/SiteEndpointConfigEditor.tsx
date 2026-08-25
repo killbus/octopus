@@ -50,6 +50,7 @@ const ENDPOINT_MODE_KEYS: Record<
 type Props = {
   config: SiteModelEndpointConfig;
   baseURL: string;
+  effectiveModelBaseURL?: string;
   onChange: (config: SiteModelEndpointConfig) => void;
 };
 
@@ -86,7 +87,7 @@ export function changeSiteDefaultEndpointSource(
   };
 }
 
-export function SiteEndpointConfigEditor({ config, baseURL, onChange }: Props) {
+export function SiteEndpointConfigEditor({ config, baseURL, effectiveModelBaseURL, onChange }: Props) {
   const t = useTranslations("siteEndpoint");
   const channelT = useTranslations("channel.form");
   const [overridePickerOpen, setOverridePickerOpen] = useState(false);
@@ -99,7 +100,7 @@ export function SiteEndpointConfigEditor({ config, baseURL, onChange }: Props) {
   const availableRouteOptions = SITE_MODEL_ROUTE_OPTIONS.filter(
     (option) => !usedRouteTypes.has(option.value),
   );
-  const defaultResolved = resolveSiteDefaultEndpointSet(config, baseURL);
+  const defaultResolved = resolveSiteDefaultEndpointSet(config, baseURL, effectiveModelBaseURL);
   const defaultCustomSet = config.default.source === "custom"
     ? config.default.endpoint_set
     : defaultResolved.endpoint_set;
@@ -122,7 +123,7 @@ export function SiteEndpointConfigEditor({ config, baseURL, onChange }: Props) {
   };
   const addOverride = (route: SiteModelRouteType) => {
     if (usedRouteTypes.has(route)) return;
-    const inherited = resolveSiteEndpointSet(config, route, baseURL).endpoint_set;
+    const inherited = resolveSiteEndpointSet(config, route, baseURL, effectiveModelBaseURL).endpoint_set;
     onChange({
       ...config,
       route_overrides: [...config.route_overrides, { route_type: route, endpoint_set: cloneSiteEndpointSet(inherited) }],
@@ -155,7 +156,7 @@ export function SiteEndpointConfigEditor({ config, baseURL, onChange }: Props) {
               {channelT(ENDPOINT_MODE_KEYS[defaultResolved.endpoint_set.base_url_mode])}
             </div>
             {config.default.source === "follow_site" ? (
-              <div className="mt-1 break-all">{deriveFollowSiteModelURL(baseURL)}</div>
+              <div className="mt-1 break-all">{effectiveModelBaseURL ?? deriveFollowSiteModelURL(baseURL)}</div>
             ) : null}
           </div>
         </div>
@@ -223,6 +224,7 @@ export function SiteEndpointConfigEditor({ config, baseURL, onChange }: Props) {
                     config,
                     option.value,
                     baseURL,
+                    effectiveModelBaseURL,
                   );
                   const isOverride = effective.source === "route_override";
                   return (

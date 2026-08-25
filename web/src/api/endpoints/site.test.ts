@@ -3,6 +3,7 @@ import { BaseUrlMode } from "./channel";
 import {
   deriveFollowSiteModelURL,
   followSiteModelEndpointConfig,
+  getEffectiveModelBaseURL,
   getFollowSiteBaseURLChangeImpact,
   normalizeSiteModelEndpointConfig,
   resolveSiteDefaultEndpointSet,
@@ -11,7 +12,7 @@ import {
 } from "./site";
 
 describe("site model endpoint config", () => {
-  it("preserves opaque query bytes while deriving FollowSite", () => {
+  it("preserves opaque query bytes while deriving FollowSite (deprecated)", () => {
     expect(
       deriveFollowSiteModelURL(
         " https://example.com///?signature=a/+%2F&token=x/&key=1&key=2&api_key=z%2B ",
@@ -19,6 +20,26 @@ describe("site model endpoint config", () => {
     ).toBe(
       "https://example.com/v1?signature=a/+%2F&token=x/&key=1&key=2&api_key=z%2B",
     );
+  });
+
+  describe("getEffectiveModelBaseURL", () => {
+    it("returns effective_model_base_url when present", () => {
+      expect(
+        getEffectiveModelBaseURL({ base_url: "https://x.example", effective_model_base_url: "https://x.example/v1" }),
+      ).toBe("https://x.example/v1");
+    });
+
+    it("falls back to deriveFollowSiteModelURL when effective_model_base_url is absent", () => {
+      expect(
+        getEffectiveModelBaseURL({ base_url: "https://x.example" }),
+      ).toBe("https://x.example/v1");
+    });
+
+    it("falls back to deriveFollowSiteModelURL when effective_model_base_url is empty", () => {
+      expect(
+        getEffectiveModelBaseURL({ base_url: "https://x.example", effective_model_base_url: "" }),
+      ).toBe("https://x.example/v1");
+    });
   });
 
   it("normalizes absent config to FollowSite", () => {
@@ -131,6 +152,40 @@ describe("site model endpoint config", () => {
     });
   });
 
+  it("uses effectiveModelBaseURL when provided to resolveSiteDefaultEndpointSet", () => {
+    const config: SiteModelEndpointConfig = {
+      default: { source: "follow_site" },
+      route_overrides: [],
+    };
+
+    expect(
+      resolveSiteDefaultEndpointSet(config, "https://control.example", "https://control.example/v1beta")
+        .endpoint_set,
+    ).toEqual({
+      base_url_mode: BaseUrlMode.Delay,
+      base_urls: [{ url: "https://control.example/v1beta" }],
+    });
+  });
+
+  it("uses effectiveModelBaseURL when provided to resolveSiteEndpointSet for follow_site routes", () => {
+    const config: SiteModelEndpointConfig = {
+      default: { source: "follow_site" },
+      route_overrides: [],
+    };
+
+    const resolved = resolveSiteEndpointSet(
+      config,
+      "gemini",
+      "https://control.example",
+      "https://control.example/v1beta",
+    );
+    expect(resolved.source).toBe("follow_site");
+    expect(resolved.endpoint_set).toEqual({
+      base_url_mode: BaseUrlMode.Delay,
+      base_urls: [{ url: "https://control.example/v1beta" }],
+    });
+  });
+
   it("reports only inherited protocols affected by a FollowSite base URL change", () => {
     const config: SiteModelEndpointConfig = {
       default: { source: "follow_site" },
@@ -189,5 +244,27 @@ describe("site model endpoint config", () => {
         "openai_chat",
       ),
     ).toEqual([]);
+  });
+
+  it("uses effectiveModelBaseURL for change impact URLs when provided", () => {
+    const config: SiteModelEndpointConfig = {
+      default: { source: "follow_site" },
+      route_overrides: [],
+    };
+    const impacts = getFollowSiteBaseURLChangeImpact(
+      config,
+      "https://old.example",
+      "https://new.example",
+      [{ models: [{ route_type: "gemini" }] }],
+      "openai_chat",
+      "https://old.example/v1beta",
+    );
+    expect(impacts).toEqual([
+      {
+        route_type: "gemini",
+        previous_url: "https://old.example/v1beta",
+        next_url: "https://new.example/v1",
+      },
+    ]);
   });
 });

@@ -79,6 +79,7 @@ type SiteFormState = {
     model_endpoint_config: SiteModelEndpointConfig;
     tags: string[];
     default_route_type: SiteModelRouteType;
+    effective_model_base_url: string;
 };
 
 const AUTO_DETECT_VALUE = '__auto__';
@@ -115,6 +116,7 @@ function createEmptySiteForm(): SiteFormState {
         model_endpoint_config: followSiteModelEndpointConfig(),
         tags: [],
         default_route_type: 'openai_chat',
+        effective_model_base_url: '',
     };
 }
 
@@ -136,6 +138,7 @@ function createSiteForm(site: SiteRecord): SiteFormState {
         model_endpoint_config: normalizeSiteModelEndpointConfig(site.model_endpoint_config),
         tags: [...(site.tags ?? [])],
         default_route_type: site.default_route_type || 'openai_chat',
+        effective_model_base_url: site.effective_model_base_url ?? '',
     };
 }
 
@@ -313,6 +316,7 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                     siteForm.base_url,
                     site.accounts ?? [],
                     site.default_route_type || siteForm.default_route_type,
+                    siteForm.effective_model_base_url || undefined,
                 );
                 if (impacts.length > 0 && !bypassFollowSiteConfirmation) {
                     setFollowSiteImpacts(impacts);
@@ -527,6 +531,7 @@ export function SiteEditDialog({ open, onOpenChange, site, onCreated, allTags }:
                             <SiteEndpointConfigEditor
                                 config={siteForm.model_endpoint_config}
                                 baseURL={siteForm.base_url}
+                                effectiveModelBaseURL={siteForm.effective_model_base_url || undefined}
                                 onChange={(model_endpoint_config) =>
                                     setSiteForm((current) => ({ ...current, model_endpoint_config }))
                                 }
