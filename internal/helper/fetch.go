@@ -54,10 +54,11 @@ func FetchModels(ctx context.Context, request model.Channel) ([]string, error) {
 
 // refer: https://platform.openai.com/docs/api-reference/models/list
 func fetchOpenAIModels(client *http.Client, ctx context.Context, request model.Channel) ([]string, error) {
+	baseURL := model.ResolveOutboundBaseURL(request.GetBaseUrl(), "/v1")
 	req, _ := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		request.GetBaseUrl()+"/models",
+		baseURL+"/models",
 		nil,
 	)
 	applyDefaultModelRequestHeaders(req, request)
@@ -85,12 +86,13 @@ func fetchOpenAIModels(client *http.Client, ctx context.Context, request model.C
 func fetchGeminiModels(client *http.Client, ctx context.Context, request model.Channel) ([]string, error) {
 	var allModels []string
 	pageToken := ""
+	baseURL := model.ResolveOutboundBaseURL(request.GetBaseUrl(), "/v1beta")
 
 	for {
 		req, _ := http.NewRequestWithContext(
 			ctx,
 			http.MethodGet,
-			request.GetBaseUrl()+"/models",
+			baseURL+"/models",
 			nil,
 		)
 		applyDefaultModelRequestHeaders(req, request)
@@ -133,11 +135,12 @@ func fetchGeminiModels(client *http.Client, ctx context.Context, request model.C
 func fetchAnthropicModels(client *http.Client, ctx context.Context, request model.Channel) ([]string, error) {
 	var allModels []string
 	var afterID string
+	baseURL := model.ResolveOutboundBaseURL(request.GetBaseUrl(), "/v1")
 	for {
 		req, _ := http.NewRequestWithContext(
 			ctx,
 			http.MethodGet,
-			request.GetBaseUrl()+"/models",
+			baseURL+"/models",
 			nil,
 		)
 		applyDefaultModelRequestHeaders(req, request)

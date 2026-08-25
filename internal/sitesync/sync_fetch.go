@@ -477,16 +477,11 @@ func buildModelFetchBaseURLs(siteRecord *model.Site) []string {
 		return nil
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(siteRecord.BaseURL), "/")
+	baseURL := model.NormalizeSiteModelEndpointURL(siteRecord.BaseURL)
 	if baseURL == "" {
 		return nil
 	}
-
-	candidates := []string{baseURL}
-	if sitePlatformUsesV1ModelEndpoint(siteRecord) && !strings.HasSuffix(strings.ToLower(baseURL), "/v1") {
-		candidates = append(candidates, baseURL+"/v1")
-	}
-	return candidates
+	return []string{baseURL}
 }
 
 func filterSessionFallbackModelsByGroup(
@@ -558,14 +553,6 @@ func stringSliceContainsFold(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func sitePlatformUsesV1ModelEndpoint(site *model.Site) bool {
-	if site.Platform == model.SitePlatformAPI {
-		rt := site.ResolveDefaultRouteType()
-		return rt == model.SiteModelRouteTypeOpenAIChat || rt == ""
-	}
-	return true
 }
 
 func buildSiteModels(names []string, groupKey string, source string) []model.SiteModel {

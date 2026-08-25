@@ -47,3 +47,55 @@ func TestFetchModelsUsesBrowserHeadersAndSummarizesHTMLError(t *testing.T) {
 		t.Fatalf("expected Accept-Language header to be set")
 	}
 }
+
+func TestFetchGeminiModelsURL_BareDomain(t *testing.T) {
+	var observedPath string
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			observedPath = r.URL.Path
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/v1beta") {
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		} else {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		}
+	}))
+	defer server.Close()
+
+	_, err := FetchModels(context.Background(), model.Channel{
+		Type:     outbound.OutboundTypeGemini,
+		BaseUrls: []model.BaseUrl{{URL: server.URL, Delay: 0}},
+		Keys:     []model.ChannelKey{{Enabled: true, ChannelKey: "test-key"}},
+	})
+	if err != nil {
+		t.Fatalf("FetchModels returned error: %v", err)
+	}
+	if observedPath != "/v1beta/models" {
+		t.Fatalf("expected path %q, got %q", "/v1beta/models", observedPath)
+	}
+}
+
+func TestFetchOpenAIModelsURL_BareDomain(t *testing.T) {
+	var observedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+
+	_, err := FetchModels(context.Background(), model.Channel{
+		Type:     outbound.OutboundTypeOpenAIChat,
+		BaseUrls: []model.BaseUrl{{URL: server.URL, Delay: 0}},
+		Keys:     []model.ChannelKey{{Enabled: true, ChannelKey: "test-key"}},
+	})
+	if err != nil {
+		t.Fatalf("FetchModels returned error: %v", err)
+	}
+	if observedPath != "/v1/models" {
+		t.Fatalf("expected path %q, got %q", "/v1/models", observedPath)
+	}
+}

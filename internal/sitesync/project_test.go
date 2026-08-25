@@ -704,9 +704,9 @@ func TestSiteModelEndpointSnapshotAppliesOverride(t *testing.T) {
 	if got := snapshot.resolve(model.SiteModelRouteTypeAnthropic).BaseURLs[0].URL; got != "https://example.com/anthropic/v1" {
 		t.Fatalf("expected anthropic override, got %q", got)
 	}
-	// Non-overridden route falls back to the default /v1 behavior.
-	if got := snapshot.resolve(model.SiteModelRouteTypeOpenAIResponse).BaseURLs[0].URL; got != "https://example.com/v1" {
-		t.Fatalf("expected default /v1 base for non-overridden route, got %q", got)
+	// Non-overridden route falls back to the bare base URL.
+	if got := snapshot.resolve(model.SiteModelRouteTypeOpenAIResponse).BaseURLs[0].URL; got != "https://example.com" {
+		t.Fatalf("expected bare base for non-overridden route, got %q", got)
 	}
 }
 
@@ -1120,8 +1120,8 @@ func assertProjectedChannel(t *testing.T, channelsByGroup map[string]model.Chann
 	if channel.Model != expectedModel {
 		t.Fatalf("expected channel %q model %q, got %q", groupKey, expectedModel, channel.Model)
 	}
-	if len(channel.BaseUrls) != 1 || channel.BaseUrls[0].URL != "https://example.com/v1" {
-		t.Fatalf("expected channel %q base URL to be projected with /v1 suffix, got %#v", groupKey, channel.BaseUrls)
+	if len(channel.BaseUrls) != 1 || channel.BaseUrls[0].URL != "https://example.com" {
+		t.Fatalf("expected channel %q base URL to be %q, got %#v", groupKey, "https://example.com", channel.BaseUrls)
 	}
 	if len(channel.Keys) != 2 {
 		t.Fatalf("expected channel %q to carry both projected keys, got %d", groupKey, len(channel.Keys))

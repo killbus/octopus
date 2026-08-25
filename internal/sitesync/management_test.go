@@ -47,7 +47,7 @@ func TestSyncManagementPlatformDiscoversNewAPIUserID(t *testing.T) {
 				return
 			}
 			_, _ = w.Write([]byte(`{"data":[{"id":"vip","name":"VIP"}]}`))
-		case r.URL.Path == "/models":
+		case r.URL.Path == "/v1/models":
 			if r.Header.Get("Authorization") != "Bearer sk-managed-key" {
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
@@ -115,7 +115,7 @@ func TestSyncManagementPlatformUsesStoredNewAPIUserID(t *testing.T) {
 				return
 			}
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"}]}`))
-		case r.URL.Path == "/models":
+		case r.URL.Path == "/v1/models":
 			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o-mini"}]}`))
 		default:
 			http.NotFound(w, r)
@@ -168,9 +168,6 @@ func TestSyncManagementPlatformUsesV1ModelsWhenRootModelEndpointReturnsHTML(t *t
 				return
 			}
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"}]}`))
-		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><body>site home</body></html>`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			observedV1AuthHeader = r.Header.Get("Authorization")
@@ -231,8 +228,9 @@ func TestSyncManagementPlatformFallsBackToUserModelsWhenTokenModelsUnavailable(t
 			}
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"}]}`))
 		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><body>site home</body></html>`))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"unauthorized"}}`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -304,9 +302,6 @@ func TestSyncManagementPlatformDoesNotFallbackWithoutExplicitGroupMatch(t *testi
 		case r.URL.Path == "/api/user/self/groups":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"}]}`))
-		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[]}`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[]}`))
@@ -358,6 +353,9 @@ func TestSyncManagementPlatformPrefersStableGroupErrorOverHTMLSummary(t *testing
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"}]}`))
 		case r.URL.Path == "/models":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<!doctype html><html><head><title>New API</title></head><body>site home</body></html>`))
+		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write([]byte(`<!doctype html><html><head><title>New API</title></head><body>site home</body></html>`))
 		case r.URL.Path == "/api/user/models":
@@ -451,8 +449,9 @@ func TestSyncManagementPlatformFallsBackUsingAvailableModelExplicitGroups(t *tes
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"}]}`))
 		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><body>site home</body></html>`))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"unauthorized"}}`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -511,9 +510,6 @@ func TestSyncManagementPlatformMarksAllGroupsEmptyWhenSessionModelsAreEmpty(t *t
 		case r.URL.Path == "/api/user/self/groups":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"},{"id":"vip","name":"VIP"}]}`))
-		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[]}`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[]}`))
@@ -574,9 +570,6 @@ func TestSyncManagementPlatformFallsBackPerFailedGroupWithoutOverwritingExactMod
 		case r.URL.Path == "/api/user/self/groups":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"},{"id":"vip","name":"VIP"}]}`))
-		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><body>site home</body></html>`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			switch r.Header.Get("Authorization") {
@@ -668,9 +661,6 @@ func TestSyncManagementPlatformReturnsPartialWhenSomeGroupsRemainUnresolved(t *t
 		case r.URL.Path == "/api/user/self/groups":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"},{"id":"vip","name":"VIP"}]}`))
-		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><body>site home</body></html>`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			switch r.Header.Get("Authorization") {
@@ -756,9 +746,6 @@ func TestSyncManagementPlatformCachesFallbackUserModelsAcrossFailedGroups(t *tes
 		case r.URL.Path == "/api/user/self/groups":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default","name":"default"},{"id":"vip","name":"VIP"}]}`))
-		case r.URL.Path == "/models":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[]}`))
 		case r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[]}`))
