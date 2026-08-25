@@ -71,9 +71,13 @@ func (o *MessageOutbound) TransformRequest(ctx context.Context, request *model.I
 	}
 
 	// Parse and set URL
-	parsedUrl, err := url.Parse(strings.TrimSuffix(baseUrl, "/"))
+	parsedUrl, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
+	}
+	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
+	if !model.HasVersionSegment(parsedUrl.Path) {
+		parsedUrl.Path = parsedUrl.Path + "/v1"
 	}
 
 	parsedUrl.Path = parsedUrl.Path + "/messages"
@@ -128,9 +132,13 @@ func (o *MessageOutbound) TransformRequestRaw(ctx context.Context, rawBody []byt
 	req.Header.Set("anthropic-beta", DefaultAnthropicPassthroughBeta)
 	req.Header.Set("X-API-Key", key)
 
-	parsedUrl, err := url.Parse(strings.TrimSuffix(baseUrl, "/"))
+	parsedUrl, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
+	}
+	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
+	if !model.HasVersionSegment(parsedUrl.Path) {
+		parsedUrl.Path = parsedUrl.Path + "/v1"
 	}
 	parsedUrl.Path = parsedUrl.Path + "/messages"
 	if query != nil {

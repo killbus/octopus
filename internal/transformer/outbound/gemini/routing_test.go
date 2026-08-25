@@ -134,9 +134,9 @@ func TestTransformRequestStreamKeepsAltSse(t *testing.T) {
 	}
 }
 
-// pathHasGeminiVersion isolates the small heuristic so future docs-only
-// additions (e.g. v2) are easy to spot in tests.
-func TestPathHasGeminiVersion(t *testing.T) {
+// TestHasVersionSegment verifies the shared version-segment heuristic used
+// by G-H5 to decide whether to prepend /v1beta as a fallback.
+func TestHasVersionSegment(t *testing.T) {
 	cases := []struct {
 		path string
 		want bool
@@ -146,13 +146,13 @@ func TestPathHasGeminiVersion(t *testing.T) {
 		{"/v1", true},
 		{"/v1beta", true},
 		{"/v1beta/", true},
-		{"/v1alpha/models", true},
+		{"/v1alpha/models", false},
 		{"/viewer", false},
-		{"/proxy/v1beta", false}, // only matches first segment
+		{"/proxy/v1beta", true}, // checks last segment
 	}
 	for _, c := range cases {
-		if got := pathHasGeminiVersion(c.path); got != c.want {
-			t.Errorf("pathHasGeminiVersion(%q) = %v, want %v", c.path, got, c.want)
+		if got := model.HasVersionSegment(c.path); got != c.want {
+			t.Errorf("HasVersionSegment(%q) = %v, want %v", c.path, got, c.want)
 		}
 	}
 }

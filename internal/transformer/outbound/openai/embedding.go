@@ -75,9 +75,13 @@ func (o *EmbeddingOutbound) TransformRequest(ctx context.Context, request *model
 	req.Header.Set("Authorization", "Bearer "+key)
 	applyOpenAIOrgProjectHeaders(req, request)
 
-	parsedUrl, err := url.Parse(strings.TrimSuffix(baseUrl, "/"))
+	parsedUrl, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
+	}
+	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
+	if !model.HasVersionSegment(parsedUrl.Path) {
+		parsedUrl.Path = parsedUrl.Path + "/v1"
 	}
 	parsedUrl.Path = parsedUrl.Path + "/embeddings"
 	req.URL = parsedUrl

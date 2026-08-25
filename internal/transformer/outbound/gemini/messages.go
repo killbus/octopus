@@ -63,18 +63,19 @@ func (o *MessagesOutbound) TransformRequest(ctx context.Context, request *model.
 	}
 
 	// Build URL
-	parsedUrl, err := url.Parse(strings.TrimSuffix(baseUrl, "/"))
+	parsedUrl, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
+	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
 
 	// G-H5: When the channel BaseURL omits the API version segment
 	// (`https://generativelanguage.googleapis.com`), the downstream request
 	// would land on `/models/...` which 404s. Fall back to `/v1beta` when
 	// no version prefix is configured; leave explicit `/v1` or `/v1beta`
 	// paths alone.
-	if !pathHasGeminiVersion(parsedUrl.Path) {
-		parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/") + "/v1beta"
+	if !model.HasVersionSegment(parsedUrl.Path) {
+		parsedUrl.Path = parsedUrl.Path + "/v1beta"
 	}
 
 	// Determine if streaming
@@ -297,28 +298,6 @@ func reasoningToThinkingBudget(effort string) int32 {
 		// 防御性：未知值走动态
 		return -1
 	}
-}
-
-// pathHasGeminiVersion reports whether the configured base-URL path already
-// contains a Gemini API version segment (`/v1`, `/v1beta`, etc.). Used by
-// G-H5 to decide whether to prepend `/v1beta` as a fallback when channels
-// were provisioned with a bare hostname. Matching on a leading `/v` prefix
-// covers the versions Google documents (v1, v1beta, v1beta2, v1alpha) and
-// will survive future bumps without churn.
-func pathHasGeminiVersion(p string) bool {
-	segment := strings.Trim(p, "/")
-	if segment == "" {
-		return false
-	}
-	first := segment
-	if idx := strings.Index(segment, "/"); idx >= 0 {
-		first = segment[:idx]
-	}
-	if len(first) < 2 || first[0] != 'v' {
-		return false
-	}
-	// Must be `v<digit>...`; `/viewer` etc. should not count.
-	return first[1] >= '0' && first[1] <= '9'
 }
 
 // canonicalGeminiModality normalises a client-supplied modality keyword into

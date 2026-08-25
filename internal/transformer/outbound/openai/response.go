@@ -73,9 +73,13 @@ func (o *ResponseOutbound) TransformRequest(ctx context.Context, request *model.
 	applyOpenAIOrgProjectHeaders(req, request)
 
 	// Parse and set URL
-	parsedUrl, err := url.Parse(strings.TrimSuffix(baseUrl, "/"))
+	parsedUrl, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
+	}
+	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
+	if !model.HasVersionSegment(parsedUrl.Path) {
+		parsedUrl.Path = parsedUrl.Path + "/v1"
 	}
 	parsedUrl.Path = parsedUrl.Path + "/responses"
 	req.URL = parsedUrl
@@ -116,9 +120,13 @@ func (o *ResponseOutbound) TransformRequestRaw(ctx context.Context, rawBody []by
 	// copyHeaders on the raw-passthrough path, so no explicit application
 	// is needed here (O-M7).
 
-	parsedURL, err := url.Parse(strings.TrimSuffix(baseUrl, "/"))
+	parsedURL, err := url.Parse(baseUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
+	}
+	parsedURL.Path = strings.TrimRight(parsedURL.Path, "/")
+	if !model.HasVersionSegment(parsedURL.Path) {
+		parsedURL.Path = parsedURL.Path + "/v1"
 	}
 	parsedURL.Path = parsedURL.Path + "/responses"
 	if query != nil {
