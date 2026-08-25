@@ -70,6 +70,9 @@ func listSite(c *gin.Context) {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	for i := range sites {
+		sites[i].EffectiveModelBaseURL = model.EffectiveModelBaseURL(sites[i].BaseURL, sites[i].DefaultRouteType)
+	}
 	resp.Success(c, sites)
 }
 
@@ -164,6 +167,7 @@ func updateSite(c *gin.Context) {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	site.EffectiveModelBaseURL = model.EffectiveModelBaseURL(site.BaseURL, site.DefaultRouteType)
 	siteID := site.ID
 	safe.Go("site-update-project", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -243,6 +247,9 @@ func listArchivedSites(c *gin.Context) {
 	if err != nil {
 		resp.Error(c, http.StatusInternalServerError, err.Error())
 		return
+	}
+	for i := range sites {
+		sites[i].EffectiveModelBaseURL = model.EffectiveModelBaseURL(sites[i].BaseURL, sites[i].DefaultRouteType)
 	}
 	resp.Success(c, sites)
 }

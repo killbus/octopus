@@ -160,7 +160,8 @@ type Site struct {
 	RouteBaseURLsSet        bool                    `json:"-" gorm:"-"`
 	DefaultRouteType        SiteModelRouteType      `json:"default_route_type" gorm:"type:varchar(32);not null;default:''"`
 	Tags                    []string                `json:"tags" gorm:"serializer:json"`
-	Archived                bool                    `json:"archived" gorm:"default:false;index"`
+	EffectiveModelBaseURL string                  `json:"effective_model_base_url" gorm:"-"`
+	Archived              bool                    `json:"archived" gorm:"default:false;index"`
 	ArchivedAt              *time.Time              `json:"archived_at"`
 	Accounts                []SiteAccount           `json:"accounts,omitempty" gorm:"foreignKey:SiteID"`
 }

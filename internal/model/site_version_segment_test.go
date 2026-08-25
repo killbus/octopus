@@ -67,6 +67,56 @@ func TestResolveOutboundBaseURL(t *testing.T) {
 	}
 }
 
+func TestEffectiveModelBaseURL_PureFunction(t *testing.T) {
+	cases := []struct {
+		name      string
+		baseURL   string
+		routeType SiteModelRouteType
+		want      string
+	}{
+		{"bare-domain-gemini", "https://example.com", SiteModelRouteTypeGemini, "https://example.com/v1beta"},
+		{"bare-domain-openai", "https://example.com", SiteModelRouteTypeOpenAIChat, "https://example.com/v1"},
+		{"v1beta-gemini", "https://example.com/v1beta", SiteModelRouteTypeGemini, "https://example.com/v1beta"},
+		{"v1-openai", "https://example.com/v1", SiteModelRouteTypeOpenAIChat, "https://example.com/v1"},
+		{"duplicate-v1beta-v1-gemini", "https://example.com/v1beta/v1", SiteModelRouteTypeGemini, "https://example.com/v1beta/v1"},
+		{"bare-domain-anthropic", "https://example.com", SiteModelRouteTypeAnthropic, "https://example.com/v1"},
+		{"bare-domain-response", "https://example.com", SiteModelRouteTypeOpenAIResponse, "https://example.com/v1"},
+		{"bare-domain-embedding", "https://example.com", SiteModelRouteTypeOpenAIEmbedding, "https://example.com/v1"},
+		{"empty-base-url", "", SiteModelRouteTypeGemini, ""},
+		{"trailing-slash-gemini", "https://example.com/", SiteModelRouteTypeGemini, "https://example.com/v1beta"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EffectiveModelBaseURL(tc.baseURL, tc.routeType)
+			if got != tc.want {
+				t.Errorf("EffectiveModelBaseURL(%q, %q) = %q, want %q", tc.baseURL, tc.routeType, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultVersionSegmentForRouteType(t *testing.T) {
+	cases := []struct {
+		routeType SiteModelRouteType
+		want      string
+	}{
+		{SiteModelRouteTypeGemini, "/v1beta"},
+		{SiteModelRouteTypeOpenAIChat, "/v1"},
+		{SiteModelRouteTypeOpenAIResponse, "/v1"},
+		{SiteModelRouteTypeOpenAIEmbedding, "/v1"},
+		{SiteModelRouteTypeAnthropic, "/v1"},
+		{SiteModelRouteTypeVolcengine, "/v1"},
+		{SiteModelRouteTypeUnknown, "/v1"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.routeType), func(t *testing.T) {
+			if got := DefaultVersionSegmentForRouteType(tc.routeType); got != tc.want {
+				t.Errorf("DefaultVersionSegmentForRouteType(%q) = %q, want %q", tc.routeType, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestVersionSegmentVectors(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "version-segment-vectors.json"))
 	if err != nil {

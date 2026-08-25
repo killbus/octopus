@@ -5,6 +5,28 @@ import (
 	"strings"
 )
 
+// DefaultVersionSegmentForRouteType returns the version segment that the
+// outbound transformer for the given route type will fill when the base URL
+// has no trailing version segment.
+func DefaultVersionSegmentForRouteType(routeType SiteModelRouteType) string {
+	if NormalizeSiteModelRouteType(routeType) == SiteModelRouteTypeGemini {
+		return "/v1beta"
+	}
+	return "/v1"
+}
+
+// EffectiveModelBaseURL computes the final outbound base URL (including the
+// version segment, normalised) that the relay will use for the given site
+// base URL and route type. It is a pure function suitable for unit testing
+// and for the Site API to return to the frontend.
+func EffectiveModelBaseURL(baseURL string, routeType SiteModelRouteType) string {
+	if baseURL == "" {
+		return ""
+	}
+	segment := DefaultVersionSegmentForRouteType(routeType)
+	return ResolveOutboundBaseURL(baseURL, segment)
+}
+
 // HasVersionSegment reports whether the path ends with a version segment: a
 // path segment starting with `v` followed by a digit (e.g. /v1, /v1beta,
 // /v2). Paths such as /viewer do not count. /v1x does count (the rest is
