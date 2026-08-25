@@ -225,7 +225,7 @@ func TestProjectAccountClearsOverrideBackToDefaultEndpointSet(t *testing.T) {
 
 func TestBuildProjectedChannelBaseURLPreservesQueryBytes(t *testing.T) {
 	site := &model.Site{BaseURL: "https://example.com///?signature=a/+%2F&token=x/"}
-	want := "https://example.com/v1?signature=a/+%2F&token=x/"
+	want := "https://example.com?signature=a/+%2F&token=x/"
 	if got := buildProjectedChannelBaseURL(site); got != want {
 		t.Fatalf("buildProjectedChannelBaseURL() = %q, want %q", got, want)
 	}

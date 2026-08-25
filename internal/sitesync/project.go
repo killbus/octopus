@@ -433,21 +433,7 @@ func buildProjectedChannelBaseURL(siteRecord *model.Site) string {
 	if siteRecord == nil {
 		return ""
 	}
-
-	baseURL := model.NormalizeSiteModelEndpointURL(siteRecord.BaseURL)
-	if baseURL == "" {
-		return ""
-	}
-	queryIndex := strings.IndexByte(baseURL, '?')
-	pathEnd := len(baseURL)
-	if queryIndex >= 0 {
-		pathEnd = queryIndex
-	}
-	path, suffix := baseURL[:pathEnd], baseURL[pathEnd:]
-	if strings.HasSuffix(strings.ToLower(path), "/v1") {
-		return baseURL
-	}
-	return path + "/v1" + suffix
+	return model.NormalizeSiteModelEndpointURL(siteRecord.BaseURL)
 }
 
 func mergeProjectedBaseURLs(existing []model.BaseUrl, configured []model.SiteModelEndpoint) []model.BaseUrl {

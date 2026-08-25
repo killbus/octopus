@@ -19,29 +19,29 @@ func TestBuildProjectedChannelBaseURL(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "new api appends v1",
+			name:     "bare domain passthrough",
 			site:     &model.Site{Platform: model.SitePlatformNewAPI, BaseURL: "https://example.com"},
-			expected: "https://example.com/v1",
+			expected: "https://example.com",
 		},
 		{
-			name:     "one hub preserves existing v1",
+			name:     "existing v1 passthrough",
 			site:     &model.Site{Platform: model.SitePlatformOneHub, BaseURL: "https://example.com/v1"},
 			expected: "https://example.com/v1",
 		},
 		{
-			name:     "api platform preserves custom path and appends v1",
+			name:     "custom path passthrough",
 			site:     &model.Site{Platform: model.SitePlatformAPI, BaseURL: "https://example.com/openai"},
-			expected: "https://example.com/openai/v1",
+			expected: "https://example.com/openai",
 		},
 		{
-			name:     "api platform with anthropic default appends v1",
+			name:     "anthropic bare domain passthrough",
 			site:     &model.Site{Platform: model.SitePlatformAPI, DefaultRouteType: model.SiteModelRouteTypeAnthropic, BaseURL: "https://api.anthropic.com"},
-			expected: "https://api.anthropic.com/v1",
+			expected: "https://api.anthropic.com",
 		},
 		{
-			name:     "api platform with gemini default appends v1",
+			name:     "gemini bare domain passthrough",
 			site:     &model.Site{Platform: model.SitePlatformAPI, DefaultRouteType: model.SiteModelRouteTypeGemini, BaseURL: "https://gemini.example.com"},
-			expected: "https://gemini.example.com/v1",
+			expected: "https://gemini.example.com",
 		},
 		{
 			name:     "nil site returns empty",
@@ -56,6 +56,20 @@ func TestBuildProjectedChannelBaseURL(t *testing.T) {
 				t.Fatalf("expected %q, got %q", tt.expected, actual)
 			}
 		})
+	}
+}
+
+func TestBuildProjectedChannelBaseURL_Passthrough_V1beta(t *testing.T) {
+	site := &model.Site{Platform: model.SitePlatformAPI, BaseURL: "https://generativelanguage.googleapis.com/v1beta"}
+	if actual := buildProjectedChannelBaseURL(site); actual != "https://generativelanguage.googleapis.com/v1beta" {
+		t.Fatalf("expected %q, got %q", "https://generativelanguage.googleapis.com/v1beta", actual)
+	}
+}
+
+func TestBuildProjectedChannelBaseURL_Passthrough_BareDomain(t *testing.T) {
+	site := &model.Site{Platform: model.SitePlatformAPI, BaseURL: "https://generativelanguage.googleapis.com"}
+	if actual := buildProjectedChannelBaseURL(site); actual != "https://generativelanguage.googleapis.com" {
+		t.Fatalf("expected %q, got %q", "https://generativelanguage.googleapis.com", actual)
 	}
 }
 
