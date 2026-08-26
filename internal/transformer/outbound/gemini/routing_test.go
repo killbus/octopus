@@ -24,9 +24,12 @@ func newGeminiRequestForRouting(stream bool) *model.InternalLLMRequest {
 	return req
 }
 
-// G-H5: a base URL without an API-version segment should auto-prepend
-// `/v1beta`; otherwise Gemini returns 404.
-func TestTransformRequestFillsDefaultGeminiApiVersion(t *testing.T) {
+// The transformer is a pure operation-path transform: it never fills in a
+// version segment. A bare base (no `/v1beta`) is used as-is and only the
+// operation path is appended. Version-segment completion is the
+// projection-time `follow_site` resolution's job, so a bare base reaching the
+// transformer means the caller intentionally wants it verbatim.
+func TestTransformRequestPreservesBareBaseURL(t *testing.T) {
 	outbound := &MessagesOutbound{}
 	req, err := outbound.TransformRequest(
 		context.Background(),
@@ -43,13 +46,13 @@ func TestTransformRequestFillsDefaultGeminiApiVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse url: %v", err)
 	}
-	if u.Path != "/v1beta/models/gemini-2.5-pro:generateContent" {
-		t.Fatalf("expected /v1beta prepended, got %s", u.Path)
+	if u.Path != "/models/gemini-2.5-pro:generateContent" {
+		t.Fatalf("expected bare base + operation path, got %s", u.Path)
 	}
 }
 
-// Explicit `/v1` or `/v1beta` paths must survive verbatim — we only back-fill
-// when no version is present at all.
+// Explicit `/v1`, `/v1beta`, `/v1alpha` paths must survive verbatim — the
+// transformer only appends the operation path.
 func TestTransformRequestPreservesExplicitGeminiApiVersion(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -131,28 +134,5 @@ func TestTransformRequestStreamKeepsAltSse(t *testing.T) {
 	}
 	if got := req.URL.Path; got != "/v1beta/models/gemini-2.5-pro:streamGenerateContent" {
 		t.Fatalf("expected stream method path, got %s", got)
-	}
-}
-
-// TestHasVersionSegment verifies the shared version-segment heuristic used
-// by G-H5 to decide whether to prepend /v1beta as a fallback.
-func TestHasVersionSegment(t *testing.T) {
-	cases := []struct {
-		path string
-		want bool
-	}{
-		{"", false},
-		{"/", false},
-		{"/v1", true},
-		{"/v1beta", true},
-		{"/v1beta/", true},
-		{"/v1alpha/models", false},
-		{"/viewer", false},
-		{"/proxy/v1beta", true}, // checks last segment
-	}
-	for _, c := range cases {
-		if got := model.HasVersionSegment(c.path); got != c.want {
-			t.Errorf("HasVersionSegment(%q) = %v, want %v", c.path, got, c.want)
-		}
 	}
 }

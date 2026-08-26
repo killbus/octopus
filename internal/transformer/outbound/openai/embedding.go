@@ -80,9 +80,6 @@ func (o *EmbeddingOutbound) TransformRequest(ctx context.Context, request *model
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
 	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
-	if !model.HasVersionSegment(parsedUrl.Path) {
-		parsedUrl.Path = parsedUrl.Path + "/v1"
-	}
 	parsedUrl.Path = parsedUrl.Path + "/embeddings"
 	req.URL = parsedUrl
 	req.Method = http.MethodPost

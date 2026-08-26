@@ -78,9 +78,6 @@ func (o *ResponseOutbound) TransformRequest(ctx context.Context, request *model.
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
 	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
-	if !model.HasVersionSegment(parsedUrl.Path) {
-		parsedUrl.Path = parsedUrl.Path + "/v1"
-	}
 	parsedUrl.Path = parsedUrl.Path + "/responses"
 	req.URL = parsedUrl
 	req.Method = http.MethodPost
@@ -125,9 +122,6 @@ func (o *ResponseOutbound) TransformRequestRaw(ctx context.Context, rawBody []by
 		return nil, fmt.Errorf("failed to parse base url: %w", err)
 	}
 	parsedURL.Path = strings.TrimRight(parsedURL.Path, "/")
-	if !model.HasVersionSegment(parsedURL.Path) {
-		parsedURL.Path = parsedURL.Path + "/v1"
-	}
 	parsedURL.Path = parsedURL.Path + "/responses"
 	if query != nil {
 		parsedURL.RawQuery = query.Encode()

@@ -5,14 +5,20 @@ import (
 	"strings"
 )
 
-// DefaultVersionSegmentForRouteType returns the version segment that the
-// outbound transformer for the given route type will fill when the base URL
-// has no trailing version segment.
+// DefaultVersionSegmentForRouteType returns the version segment used when the
+// projection-time follow_site resolution fills a bare base URL for the given
+// route type. An empty result means the route type has no version segment and
+// the base URL is used as-is. Outbound transformers do not fill version
+// segments; they only append the operation path.
 func DefaultVersionSegmentForRouteType(routeType SiteModelRouteType) string {
-	if NormalizeSiteModelRouteType(routeType) == SiteModelRouteTypeGemini {
+	switch NormalizeSiteModelRouteType(routeType) {
+	case SiteModelRouteTypeGemini:
 		return "/v1beta"
+	case SiteModelRouteTypeVolcengine:
+		return ""
+	default:
+		return "/v1"
 	}
-	return "/v1"
 }
 
 // EffectiveModelBaseURL computes the final outbound base URL (including the

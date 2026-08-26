@@ -8,6 +8,9 @@ import (
 	"github.com/bestruirui/octopus/internal/transformer/model"
 )
 
+// The transformer is a pure operation-path transform: it never fills in a
+// version segment. A bare base is used verbatim and only `/messages` is
+// appended; version-segment completion happens at projection time.
 func TestAnthropicMessagesTransformRequest_BareDomain(t *testing.T) {
 	outbound := &MessageOutbound{}
 	req := &model.InternalLLMRequest{
@@ -26,8 +29,8 @@ func TestAnthropicMessagesTransformRequest_BareDomain(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, httpReq.Body)
 
-	if httpReq.URL.Path != "/v1/messages" {
-		t.Errorf("expected /v1/messages, got %s", httpReq.URL.Path)
+	if httpReq.URL.Path != "/messages" {
+		t.Errorf("expected bare base + /messages, got %s", httpReq.URL.Path)
 	}
 }
 
@@ -71,7 +74,7 @@ func TestAnthropicMessagesTransformRequestRaw_BareDomain(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, httpReq.Body)
 
-	if httpReq.URL.Path != "/v1/messages" {
-		t.Errorf("expected /v1/messages, got %s", httpReq.URL.Path)
+	if httpReq.URL.Path != "/messages" {
+		t.Errorf("expected bare base + /messages, got %s", httpReq.URL.Path)
 	}
 }

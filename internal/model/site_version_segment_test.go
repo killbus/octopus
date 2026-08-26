@@ -80,6 +80,8 @@ func TestEffectiveModelBaseURL_PureFunction(t *testing.T) {
 		{"v1-openai", "https://example.com/v1", SiteModelRouteTypeOpenAIChat, "https://example.com/v1"},
 		{"duplicate-v1beta-v1-gemini", "https://example.com/v1beta/v1", SiteModelRouteTypeGemini, "https://example.com/v1beta/v1"},
 		{"bare-domain-anthropic", "https://example.com", SiteModelRouteTypeAnthropic, "https://example.com/v1"},
+		{"bare-domain-volcengine", "https://example.com", SiteModelRouteTypeVolcengine, "https://example.com"},
+		{"volcengine-path-preserved", "https://example.com/ark", SiteModelRouteTypeVolcengine, "https://example.com/ark"},
 		{"bare-domain-response", "https://example.com", SiteModelRouteTypeOpenAIResponse, "https://example.com/v1"},
 		{"bare-domain-embedding", "https://example.com", SiteModelRouteTypeOpenAIEmbedding, "https://example.com/v1"},
 		{"empty-base-url", "", SiteModelRouteTypeGemini, ""},
@@ -105,7 +107,7 @@ func TestDefaultVersionSegmentForRouteType(t *testing.T) {
 		{SiteModelRouteTypeOpenAIResponse, "/v1"},
 		{SiteModelRouteTypeOpenAIEmbedding, "/v1"},
 		{SiteModelRouteTypeAnthropic, "/v1"},
-		{SiteModelRouteTypeVolcengine, "/v1"},
+		{SiteModelRouteTypeVolcengine, ""},
 		{SiteModelRouteTypeUnknown, "/v1"},
 	}
 	for _, tc := range cases {

@@ -69,15 +69,6 @@ func (o *MessagesOutbound) TransformRequest(ctx context.Context, request *model.
 	}
 	parsedUrl.Path = strings.TrimRight(parsedUrl.Path, "/")
 
-	// G-H5: When the channel BaseURL omits the API version segment
-	// (`https://generativelanguage.googleapis.com`), the downstream request
-	// would land on `/models/...` which 404s. Fall back to `/v1beta` when
-	// no version prefix is configured; leave explicit `/v1` or `/v1beta`
-	// paths alone.
-	if !model.HasVersionSegment(parsedUrl.Path) {
-		parsedUrl.Path = parsedUrl.Path + "/v1beta"
-	}
-
 	// Determine if streaming
 	isStream := request.Stream != nil && *request.Stream
 	method := "generateContent"

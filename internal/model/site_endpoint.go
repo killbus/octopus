@@ -199,7 +199,7 @@ func ResolveSiteModelEndpointSet(config SiteModelEndpointConfig, routeType SiteM
 		return CloneSiteEndpointSet(*config.Default.EndpointSet), SiteModelEndpointResolutionDefaultCustom
 	}
 	return SiteEndpointSet{
-		BaseURLs:    []SiteModelEndpoint{{URL: followSiteURL}},
+		BaseURLs:    []SiteModelEndpoint{{URL: EffectiveModelBaseURL(followSiteURL, routeType)}},
 		BaseURLMode: BaseUrlModeDelay,
 	}, SiteModelEndpointResolutionFollowSite
 }

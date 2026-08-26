@@ -90,9 +90,9 @@ func TestProjectAccountSplitsManagedChannelsByOutboundType(t *testing.T) {
 		t.Fatalf("expected 3 bindings, got %d", len(channelsByGroup))
 	}
 
-	assertProjectedChannel(t, channelsByGroup, "default", outbound.OutboundTypeOpenAIChat, "gpt-4o-mini", false)
-	assertProjectedChannel(t, channelsByGroup, "default::anthropic", outbound.OutboundTypeAnthropic, "claude-3-5-sonnet", true)
-	assertProjectedChannel(t, channelsByGroup, "default::gemini", outbound.OutboundTypeGemini, "gemini-2.0-flash", true)
+	assertProjectedChannel(t, channelsByGroup, "default", outbound.OutboundTypeOpenAIChat, "gpt-4o-mini", "https://example.com/v1", false)
+	assertProjectedChannel(t, channelsByGroup, "default::anthropic", outbound.OutboundTypeAnthropic, "claude-3-5-sonnet", "https://example.com/v1", true)
+	assertProjectedChannel(t, channelsByGroup, "default::gemini", outbound.OutboundTypeGemini, "gemini-2.0-flash", "https://example.com/v1beta", true)
 
 	secondRunIDs, err := ProjectAccount(ctx, account.ID)
 	if err != nil {
@@ -139,11 +139,11 @@ func TestProjectAccountSupportsAllConfiguredRouteBuckets(t *testing.T) {
 		t.Fatalf("expected 5 bindings, got %d", len(channelsByGroup))
 	}
 
-	assertProjectedChannel(t, channelsByGroup, "default", outbound.OutboundTypeOpenAIChat, "gpt-4o-mini", false)
-	assertProjectedChannel(t, channelsByGroup, "default::anthropic", outbound.OutboundTypeAnthropic, "claude-3-5-sonnet", true)
-	assertProjectedChannel(t, channelsByGroup, "default::gemini", outbound.OutboundTypeGemini, "gemini-2.0-flash", true)
-	assertProjectedChannel(t, channelsByGroup, "default::volcengine", outbound.OutboundTypeVolcengine, "doubao-seed-1-6", true)
-	assertProjectedChannel(t, channelsByGroup, "default::openai-embedding", outbound.OutboundTypeOpenAIEmbedding, "text-embedding-3-large", true)
+	assertProjectedChannel(t, channelsByGroup, "default", outbound.OutboundTypeOpenAIChat, "gpt-4o-mini", "https://example.com/v1", false)
+	assertProjectedChannel(t, channelsByGroup, "default::anthropic", outbound.OutboundTypeAnthropic, "claude-3-5-sonnet", "https://example.com/v1", true)
+	assertProjectedChannel(t, channelsByGroup, "default::gemini", outbound.OutboundTypeGemini, "gemini-2.0-flash", "https://example.com/v1beta", true)
+	assertProjectedChannel(t, channelsByGroup, "default::volcengine", outbound.OutboundTypeVolcengine, "doubao-seed-1-6", "https://example.com", true)
+	assertProjectedChannel(t, channelsByGroup, "default::openai-embedding", outbound.OutboundTypeOpenAIEmbedding, "text-embedding-3-large", "https://example.com/v1", true)
 }
 
 func TestProjectAccountRewritesGroupItemsBeforeRemovingStaleManagedBindings(t *testing.T) {
@@ -704,9 +704,10 @@ func TestSiteModelEndpointSnapshotAppliesOverride(t *testing.T) {
 	if got := snapshot.resolve(model.SiteModelRouteTypeAnthropic).BaseURLs[0].URL; got != "https://example.com/anthropic/v1" {
 		t.Fatalf("expected anthropic override, got %q", got)
 	}
-	// Non-overridden route falls back to the bare base URL.
-	if got := snapshot.resolve(model.SiteModelRouteTypeOpenAIResponse).BaseURLs[0].URL; got != "https://example.com" {
-		t.Fatalf("expected bare base for non-overridden route, got %q", got)
+	// Non-overridden route falls back to the site base with the route's
+	// default version segment filled in at projection time.
+	if got := snapshot.resolve(model.SiteModelRouteTypeOpenAIResponse).BaseURLs[0].URL; got != "https://example.com/v1" {
+		t.Fatalf("expected version-segment base for non-overridden route, got %q", got)
 	}
 }
 
@@ -1107,7 +1108,7 @@ func loadProjectedChannelsByGroupKey(t *testing.T, ctx context.Context, accountI
 	return channelsByGroup
 }
 
-func assertProjectedChannel(t *testing.T, channelsByGroup map[string]model.Channel, groupKey string, expectedType outbound.OutboundType, expectedModel string, wantSuffix bool) {
+func assertProjectedChannel(t *testing.T, channelsByGroup map[string]model.Channel, groupKey string, expectedType outbound.OutboundType, expectedModel string, expectedBaseURL string, wantSuffix bool) {
 	t.Helper()
 
 	channel, ok := channelsByGroup[groupKey]
@@ -1120,8 +1121,8 @@ func assertProjectedChannel(t *testing.T, channelsByGroup map[string]model.Chann
 	if channel.Model != expectedModel {
 		t.Fatalf("expected channel %q model %q, got %q", groupKey, expectedModel, channel.Model)
 	}
-	if len(channel.BaseUrls) != 1 || channel.BaseUrls[0].URL != "https://example.com" {
-		t.Fatalf("expected channel %q base URL to be %q, got %#v", groupKey, "https://example.com", channel.BaseUrls)
+	if len(channel.BaseUrls) != 1 || channel.BaseUrls[0].URL != expectedBaseURL {
+		t.Fatalf("expected channel %q base URL to be %q, got %#v", groupKey, expectedBaseURL, channel.BaseUrls)
 	}
 	if len(channel.Keys) != 2 {
 		t.Fatalf("expected channel %q to carry both projected keys, got %d", groupKey, len(channel.Keys))

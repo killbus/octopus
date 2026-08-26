@@ -17,13 +17,18 @@ import (
 // version-segment inputs (bare domain, .../v1, .../v1beta), across the
 // OpenAI chat and Gemini route types.
 //
-// The projection layer and relay canonicalization are unexported in their
-// packages; this test reproduces their committed contracts: projection is a
-// pure passthrough of model.NormalizeSiteModelEndpointURL (project.go), and
-// the relay canonicalizes by trimming the path's trailing slash (baseurl.go).
-// The outbound transformers are the authoritative layer under test: they must
-// fill the missing version segment (or preserve the existing one) and never
-// double-append.
+// Version-segment completion lives at projection time: the follow_site branch
+// of model.ResolveSiteModelEndpointSet fills the bare base with the route
+// type's version segment (via model.EffectiveModelBaseURL). The outbound
+// transformer is a pure operation-path transform on top of that already-filled
+// base — it appends the operation path and never fills or re-fills the version
+// segment.
+//
+// The projection layer's channel build is unexported in its package; this test
+// reproduces the committed contracts: the bare follow-site base is
+// model.NormalizeSiteModelEndpointURL (buildProjectedChannelBaseURL, project.go),
+// and the follow_site resolution fills the version segment
+// (ResolveSiteModelEndpointSet, site_endpoint.go).
 func TestVersionSegmentIntegration(t *testing.T) {
 	routeCases := []struct {
 		name      string
@@ -53,25 +58,29 @@ func TestVersionSegmentIntegration(t *testing.T) {
 						BaseURL:          ic.baseURL,
 					}
 
-					// 1. Projection: passthrough, no version segment appended
-					//    (mirrors sitesync.buildProjectedChannelBaseURL).
-					projected := model.NormalizeSiteModelEndpointURL(site.BaseURL)
+					// 1. Bare follow-site base: a pure normalize passthrough, no
+					//    version segment (mirrors sitesync.buildProjectedChannelBaseURL).
+					followSiteURL := model.NormalizeSiteModelEndpointURL(site.BaseURL)
 
-					// 2. Channel built from the projection (what the relay reads).
+					// 2. follow_site projection fills the version segment
+					//    (mirrors model.ResolveSiteModelEndpointSet's follow_site branch
+					//    → model.EffectiveModelBaseURL). This is the channel base URL
+					//    the relay reads, and the authoritative version-segment layer.
+					channelBaseURL := model.EffectiveModelBaseURL(followSiteURL, rc.routeType)
+
+					// 3. Channel built from the projection (what the relay reads).
 					channel := model.Channel{
 						Type:     rc.outbound,
-						BaseUrls: []model.BaseUrl{{URL: projected, Delay: 0}},
+						BaseUrls: []model.BaseUrl{{URL: channelBaseURL, Delay: 0}},
 					}
 					relayBaseURL := channel.GetBaseUrl()
-					if relayBaseURL != projected {
-						t.Fatalf("relay base URL %q != projected base URL %q", relayBaseURL, projected)
+					if relayBaseURL != channelBaseURL {
+						t.Fatalf("relay base URL %q != channel base URL %q", relayBaseURL, channelBaseURL)
 					}
 
-					// 3. Effective base URL: what the transformer resolves to
-					//    (the single source of truth for version segments).
-					effective := model.EffectiveModelBaseURL(relayBaseURL, rc.routeType)
-
-					// 4. Relay outbound: the transformer produces the final URL.
+					// 4. Relay outbound: the transformer is a pure operation-path
+					//    transform — it appends the operation path on top of the
+					//    already-filled base and never touches the version segment.
 					relayReq, err := outbound.Get(rc.outbound).TransformRequest(
 						context.Background(),
 						newIntegrationLLMRequest(rc.outbound),
@@ -83,26 +92,26 @@ func TestVersionSegmentIntegration(t *testing.T) {
 					}
 					_, _ = io.Copy(io.Discard, relayReq.Body)
 
-					// The effective base URL must carry exactly one version
-					// segment (filled for bare domains, preserved for the rest).
-					effectivePath := mustParse(t, effective).Path
-					if countVersionSegments(effectivePath) != 1 {
-						t.Fatalf("effective base URL %q has %d version segments, want 1",
-							effective, countVersionSegments(effectivePath))
+					// The channel base URL must carry exactly one version segment
+					// (filled for bare domains, preserved for the rest).
+					channelPath := mustParse(t, channelBaseURL).Path
+					if countVersionSegments(channelPath) != 1 {
+						t.Fatalf("channel base URL %q has %d version segments, want 1",
+							channelBaseURL, countVersionSegments(channelPath))
 					}
 
-					// The outbound path must be built on top of the effective
-					// base URL path: same leading segments, no second version
-					// segment appended by the transformer.
+					// The outbound path must be built on top of the channel base
+					// path: same leading segments, no second version segment
+					// appended by the transformer.
 					outPath := relayReq.URL.Path
-					if !hasPathPrefix(outPath, effectivePath) {
-						t.Fatalf("relay outbound path %q does not start with effective base path %q",
-							outPath, effectivePath)
+					if !hasPathPrefix(outPath, channelPath) {
+						t.Fatalf("relay outbound path %q does not start with channel base path %q",
+							outPath, channelPath)
 					}
-					suffix := outPath[len(effectivePath):]
+					suffix := outPath[len(channelPath):]
 					if countVersionSegments(suffix) != 0 {
 						t.Fatalf("relay outbound path %q contains a duplicated version segment %q after %q",
-							outPath, suffix, effectivePath)
+							outPath, suffix, channelPath)
 					}
 				})
 			}

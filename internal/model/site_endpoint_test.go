@@ -184,3 +184,35 @@ func TestResolveSiteModelEndpointSetReturnsCloneAndSource(t *testing.T) {
 		t.Fatal("resolved endpoint set aliases config storage")
 	}
 }
+
+func TestResolveSiteModelEndpointSetFollowSiteFillsVersionSegment(t *testing.T) {
+	followConfig := FollowSiteModelEndpointConfig()
+	cases := []struct {
+		name        string
+		routeType   SiteModelRouteType
+		followURL   string
+		wantURL     string
+		wantSource  SiteModelEndpointResolutionSource
+	}{
+		{"gemini-bare", SiteModelRouteTypeGemini, "https://follow.example", "https://follow.example/v1beta", SiteModelEndpointResolutionFollowSite},
+		{"openai-bare", SiteModelRouteTypeOpenAIChat, "https://follow.example", "https://follow.example/v1", SiteModelEndpointResolutionFollowSite},
+		{"anthropic-bare", SiteModelRouteTypeAnthropic, "https://follow.example", "https://follow.example/v1", SiteModelEndpointResolutionFollowSite},
+		{"volcengine-bare", SiteModelRouteTypeVolcengine, "https://follow.example", "https://follow.example", SiteModelEndpointResolutionFollowSite},
+		{"gemini-segmented", SiteModelRouteTypeGemini, "https://follow.example/v1beta", "https://follow.example/v1beta", SiteModelEndpointResolutionFollowSite},
+		{"openai-segmented", SiteModelRouteTypeOpenAIChat, "https://follow.example/v1", "https://follow.example/v1", SiteModelEndpointResolutionFollowSite},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved, source := ResolveSiteModelEndpointSet(followConfig, tc.routeType, tc.followURL)
+			if source != tc.wantSource {
+				t.Fatalf("source = %q, want %q", source, tc.wantSource)
+			}
+			if len(resolved.BaseURLs) != 1 || resolved.BaseURLs[0].URL != tc.wantURL {
+				t.Fatalf("resolved = %#v, want single url %q", resolved, tc.wantURL)
+			}
+			if resolved.BaseURLMode != BaseUrlModeDelay {
+				t.Fatalf("base url mode = %d, want delay", resolved.BaseURLMode)
+			}
+		})
+	}
+}

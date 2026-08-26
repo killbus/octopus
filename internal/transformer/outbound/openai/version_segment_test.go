@@ -3,12 +3,14 @@ package openai
 import (
 	"context"
 	"io"
-	"strings"
 	"testing"
 
 	"github.com/bestruirui/octopus/internal/transformer/model"
 )
 
+// The transformer is a pure operation-path transform: it never fills in a
+// version segment. A bare base is used verbatim and only the operation path
+// is appended; version-segment completion happens at projection time.
 func TestOpenAIChatTransformRequest_BareDomain(t *testing.T) {
 	outbound := &ChatOutbound{}
 	req := &model.InternalLLMRequest{
@@ -27,11 +29,8 @@ func TestOpenAIChatTransformRequest_BareDomain(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, httpReq.Body)
 
-	if !strings.HasPrefix(httpReq.URL.Path, "/v1/") {
-		t.Errorf("expected URL path to start with /v1/, got %s", httpReq.URL.Path)
-	}
-	if httpReq.URL.Path != "/v1/chat/completions" {
-		t.Errorf("expected /v1/chat/completions, got %s", httpReq.URL.Path)
+	if httpReq.URL.Path != "/chat/completions" {
+		t.Errorf("expected bare base + /chat/completions, got %s", httpReq.URL.Path)
 	}
 }
 
@@ -76,8 +75,8 @@ func TestOpenAIResponseTransformRequest_BareDomain(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, httpReq.Body)
 
-	if httpReq.URL.Path != "/v1/responses" {
-		t.Errorf("expected /v1/responses, got %s", httpReq.URL.Path)
+	if httpReq.URL.Path != "/responses" {
+		t.Errorf("expected bare base + /responses, got %s", httpReq.URL.Path)
 	}
 }
 
@@ -98,8 +97,8 @@ func TestOpenAIResponseTransformRequestRaw_BareDomain(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, httpReq.Body)
 
-	if httpReq.URL.Path != "/v1/responses" {
-		t.Errorf("expected /v1/responses, got %s", httpReq.URL.Path)
+	if httpReq.URL.Path != "/responses" {
+		t.Errorf("expected bare base + /responses, got %s", httpReq.URL.Path)
 	}
 }
 
@@ -116,7 +115,7 @@ func TestOpenAIEmbeddingTransformRequest_BareDomain(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, httpReq.Body)
 
-	if httpReq.URL.Path != "/v1/embeddings" {
-		t.Errorf("expected /v1/embeddings, got %s", httpReq.URL.Path)
+	if httpReq.URL.Path != "/embeddings" {
+		t.Errorf("expected bare base + /embeddings, got %s", httpReq.URL.Path)
 	}
 }
