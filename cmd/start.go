@@ -10,6 +10,7 @@ import (
 	"github.com/bestruirui/octopus/internal/op"
 	"github.com/bestruirui/octopus/internal/relay"
 	"github.com/bestruirui/octopus/internal/server"
+	"github.com/bestruirui/octopus/internal/site"
 	"github.com/bestruirui/octopus/internal/task"
 	"github.com/bestruirui/octopus/internal/utils/log"
 	"github.com/bestruirui/octopus/internal/utils/safe"
@@ -85,6 +86,9 @@ var startCmd = &cobra.Command{
 		safe.Go("task-runner", task.RUN)
 		safe.Go("stats-site-model-backfill", func() {
 			op.StatsSiteModelBackfill(cmd.Context())
+		})
+		safe.Go("version-segment-backfill", func() {
+			site.VersionSegmentBackfill(cmd.Context())
 		})
 
 		// relay-log-ensure-indexes 是一个有限任务，但 CREATE INDEX 期间会持有
