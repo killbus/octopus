@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BaseUrlMode } from "./channel";
 import {
-  deriveFollowSiteModelURL,
   followSiteModelEndpointConfig,
   getEffectiveModelBaseURL,
   getFollowSiteBaseURLChangeImpact,
@@ -12,16 +11,6 @@ import {
 } from "./site";
 
 describe("site model endpoint config", () => {
-  it("preserves opaque query bytes while deriving FollowSite (deprecated)", () => {
-    expect(
-      deriveFollowSiteModelURL(
-        " https://example.com///?signature=a/+%2F&token=x/&key=1&key=2&api_key=z%2B ",
-      ),
-    ).toBe(
-      "https://example.com/v1?signature=a/+%2F&token=x/&key=1&key=2&api_key=z%2B",
-    );
-  });
-
   describe("getEffectiveModelBaseURL", () => {
     it("returns effective_model_base_url when present", () => {
       expect(
@@ -29,16 +18,16 @@ describe("site model endpoint config", () => {
       ).toBe("https://x.example/v1");
     });
 
-    it("falls back to deriveFollowSiteModelURL when effective_model_base_url is absent", () => {
+    it("falls back to base_url when effective_model_base_url is absent", () => {
       expect(
         getEffectiveModelBaseURL({ base_url: "https://x.example" }),
-      ).toBe("https://x.example/v1");
+      ).toBe("https://x.example");
     });
 
-    it("falls back to deriveFollowSiteModelURL when effective_model_base_url is empty", () => {
+    it("falls back to base_url when effective_model_base_url is empty", () => {
       expect(
         getEffectiveModelBaseURL({ base_url: "https://x.example", effective_model_base_url: "" }),
-      ).toBe("https://x.example/v1");
+      ).toBe("https://x.example");
     });
   });
 
@@ -148,7 +137,7 @@ describe("site model endpoint config", () => {
         .endpoint_set,
     ).toEqual({
       base_url_mode: BaseUrlMode.Delay,
-      base_urls: [{ url: "https://control.example/v1" }],
+      base_urls: [{ url: "https://control.example" }],
     });
   });
 
@@ -217,13 +206,13 @@ describe("site model endpoint config", () => {
     expect(impacts).toEqual([
       {
         route_type: "gemini",
-        previous_url: "https://old.example/v1",
-        next_url: "https://new.example/v1",
+        previous_url: "https://old.example",
+        next_url: "https://new.example/",
       },
       {
         route_type: "openai_chat",
-        previous_url: "https://old.example/v1",
-        next_url: "https://new.example/v1",
+        previous_url: "https://old.example",
+        next_url: "https://new.example/",
       },
     ]);
     expect(
@@ -263,7 +252,7 @@ describe("site model endpoint config", () => {
       {
         route_type: "gemini",
         previous_url: "https://old.example/v1beta",
-        next_url: "https://new.example/v1",
+        next_url: "https://new.example",
       },
     ]);
   });

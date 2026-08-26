@@ -70,24 +70,15 @@ export function followSiteModelEndpointConfig(): SiteModelEndpointConfig {
   return { default: { source: "follow_site" }, route_overrides: [] };
 }
 
-/**
- * @deprecated Use `getEffectiveModelBaseURL` instead. This function is kept
- * only as a fallback for backends that do not return `effective_model_base_url`.
- */
-export function deriveFollowSiteModelURL(baseURL: string): string {
-  const value = baseURL.trim();
-  const queryIndex = value.indexOf("?");
-  const pathEnd = queryIndex >= 0 ? queryIndex : value.length;
-  const path = value.slice(0, pathEnd).replace(/\/+$/, "");
-  const suffix = value.slice(pathEnd);
-  return `${path.toLowerCase().endsWith("/v1") ? path : `${path}/v1`}${suffix}`;
-}
-
+// The effective base URL (version segment included) is now computed by the
+// backend at projection time and returned as `effective_model_base_url`.
+// The frontend no longer derives/fills version segments — it only falls back
+// to the raw site base URL when the backend does not provide the field
+// (or provides an empty one).
 export function getEffectiveModelBaseURL(
   site: Pick<Site, "base_url" | "effective_model_base_url">,
 ): string {
-  if (site.effective_model_base_url) return site.effective_model_base_url;
-  return deriveFollowSiteModelURL(site.base_url);
+  return site.effective_model_base_url || site.base_url;
 }
 
 export function cloneSiteEndpointSet(set: SiteEndpointSet): SiteEndpointSet {
@@ -140,7 +131,7 @@ export function resolveSiteDefaultEndpointSet(
     source: "follow_site",
     endpoint_set: {
       base_url_mode: BaseUrlMode.Delay,
-      base_urls: [{ url: effectiveModelBaseURL ?? deriveFollowSiteModelURL(baseURL) }],
+      base_urls: [{ url: effectiveModelBaseURL ?? baseURL }],
     },
   };
 }
@@ -311,8 +302,8 @@ export function getFollowSiteBaseURLChangeImpact(
   effectiveModelBaseURL?: string,
 ): FollowSiteBaseURLImpact[] {
   if (config.default.source !== "follow_site") return [];
-  const previousURL = effectiveModelBaseURL ?? deriveFollowSiteModelURL(currentBaseURL);
-  const nextURL = deriveFollowSiteModelURL(nextBaseURL);
+  const previousURL = effectiveModelBaseURL ?? currentBaseURL;
+  const nextURL = nextBaseURL;
   if (previousURL === nextURL) return [];
 
   const overridden = new Set(

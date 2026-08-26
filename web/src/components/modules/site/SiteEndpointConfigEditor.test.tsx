@@ -45,7 +45,30 @@ describe("SiteEndpointConfigEditor custom API base contract", () => {
     }
   });
 
-  it("still derives the initial custom default when no earlier custom draft exists", () => {
+  it("seeds the initial custom default from the effective base URL when no earlier custom draft exists", () => {
+    const followSiteConfig: SiteModelEndpointConfig = {
+      default: { source: "follow_site" },
+      route_overrides: [],
+    };
+
+    const custom = changeSiteDefaultEndpointSource(
+      followSiteConfig,
+      "custom",
+      "https://control.example/base",
+      undefined,
+      "https://control.example/base/v1",
+    );
+
+    expect(custom.config.default).toEqual({
+      source: "custom",
+      endpoint_set: {
+        base_url_mode: BaseUrlMode.Delay,
+        base_urls: [{ url: "https://control.example/base/v1" }],
+      },
+    });
+  });
+
+  it("falls back to the raw base URL when seeding custom and no effective URL is known", () => {
     const followSiteConfig: SiteModelEndpointConfig = {
       default: { source: "follow_site" },
       route_overrides: [],
@@ -61,7 +84,7 @@ describe("SiteEndpointConfigEditor custom API base contract", () => {
       source: "custom",
       endpoint_set: {
         base_url_mode: BaseUrlMode.Delay,
-        base_urls: [{ url: "https://control.example/base/v1" }],
+        base_urls: [{ url: "https://control.example/base" }],
       },
     });
   });

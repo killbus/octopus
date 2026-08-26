@@ -6,7 +6,6 @@ import { useRef, useState } from "react";
 import { BaseUrlMode } from "@/api/endpoints/channel";
 import {
   cloneSiteEndpointSet,
-  deriveFollowSiteModelURL,
   resolveSiteDefaultEndpointSet,
   resolveSiteEndpointSet,
   type SiteEndpointSet,
@@ -64,6 +63,7 @@ export function changeSiteDefaultEndpointSource(
   source: "follow_site" | "custom",
   baseURL: string,
   customDraft?: SiteEndpointSet,
+  effectiveModelBaseURL?: string,
 ): DefaultSourceChange {
   const preservedCustomDraft = config.default.source === "custom"
     ? cloneSiteEndpointSet(config.default.endpoint_set)
@@ -78,8 +78,13 @@ export function changeSiteDefaultEndpointSource(
     };
   }
 
+  // When seeding a brand-new custom default (no preserved draft), start from
+  // the same URL the user was viewing in follow-site mode — the backend
+  // effective base URL, falling back to the raw site base URL. We never
+  // derive/append a version segment here.
   const endpointSet = cloneSiteEndpointSet(
-    preservedCustomDraft ?? resolveSiteDefaultEndpointSet(config, baseURL).endpoint_set,
+    preservedCustomDraft ??
+      resolveSiteDefaultEndpointSet(config, baseURL, effectiveModelBaseURL).endpoint_set,
   );
   return {
     config: { ...config, default: { source: "custom", endpoint_set: endpointSet } },
@@ -117,6 +122,7 @@ export function SiteEndpointConfigEditor({ config, baseURL, effectiveModelBaseUR
       source,
       baseURL,
       defaultCustomDraftRef.current,
+      effectiveModelBaseURL,
     );
     defaultCustomDraftRef.current = next.customDraft;
     onChange(next.config);
@@ -156,7 +162,7 @@ export function SiteEndpointConfigEditor({ config, baseURL, effectiveModelBaseUR
               {channelT(ENDPOINT_MODE_KEYS[defaultResolved.endpoint_set.base_url_mode])}
             </div>
             {config.default.source === "follow_site" ? (
-              <div className="mt-1 break-all">{effectiveModelBaseURL ?? deriveFollowSiteModelURL(baseURL)}</div>
+              <div className="mt-1 break-all">{effectiveModelBaseURL ?? baseURL}</div>
             ) : null}
           </div>
         </div>
