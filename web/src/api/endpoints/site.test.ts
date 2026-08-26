@@ -256,4 +256,21 @@ describe("site model endpoint config", () => {
       },
     ]);
   });
+
+  it("does not report impact when the base URL is unchanged (mode-only flip)", () => {
+    const config: SiteModelEndpointConfig = {
+      default: { source: "follow_site" },
+      route_overrides: [],
+    };
+    const base = "https://generativelanguage.googleapis.com";
+    const impacts = getFollowSiteBaseURLChangeImpact(
+      config,
+      base,
+      base,
+      [{ models: [{ route_type: "gemini" }] }],
+      "openai_chat",
+      "https://generativelanguage.googleapis.com/v1beta",
+    );
+    expect(impacts).toEqual([]);
+  });
 });

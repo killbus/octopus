@@ -302,6 +302,7 @@ export function getFollowSiteBaseURLChangeImpact(
   effectiveModelBaseURL?: string,
 ): FollowSiteBaseURLImpact[] {
   if (config.default.source !== "follow_site") return [];
+  if (nextBaseURL === currentBaseURL) return [];
   const previousURL = effectiveModelBaseURL ?? currentBaseURL;
   const nextURL = nextBaseURL;
   if (previousURL === nextURL) return [];
