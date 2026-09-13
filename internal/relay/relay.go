@@ -1255,6 +1255,24 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 			ra.stopFirstTokenTimer()
 		},
 		OnFinish: func(ctx context.Context, rawStream []byte) error {
+			// 流尾观测分类：error_event/truncated 结尾今天都会按成功记账（载荷字节已
+			// 先行透传给客户端）；empty 结尾已按 ErrEmptyUpstreamStream 失败处理，但
+			// 三者都缺一条按缺陷族检索的告警日志，这里只补日志，不改变任何返回值与
+			// 记账行为。分类在 safe.Go 之外同步执行，必须保持无 panic。
+			if kind := classifyPassthroughStreamEnd(rawStream, cfg.TerminalEvents, cfg.ErrorEvents); isPassthroughEmptyStreamKind(kind) {
+				var channelID int
+				if ra.channel != nil {
+					channelID = ra.channel.ID
+				}
+				log.Warnw("relay.empty_stream",
+					"empty_stream_kind", kind,
+					"api_key_id", ra.apiKeyID,
+					"group_id", ra.groupID,
+					"channel_id", channelID,
+					"channel", ra.channelNameForLog(),
+					"model", ra.requestModel,
+				)
+			}
 			if len(rawStream) == 0 {
 				return stream.ErrEmptyUpstreamStream
 			}
@@ -1452,110 +1470,86 @@ func (ra *relayAttempt) collectResponse() {
 	ra.metrics.SetInternalResponse(internalResponse, actualModel)
 }
 
-func (ra *relayAttempt) collectOpenAIResponsesPassthroughMetrics(ctx context.Context, rawStream []byte) {
+// classifyPassthroughStreamEnd 对直通缓存流的结尾做纯分类，绝不修改流内容：
+//   - empty         流中没有任何可解析事件（含仅有注释/空行）
+//   - error_event   出现错误事件（类型 ∈ errorEvents，或 data 载荷为协议错误形状）
+//   - terminal      出现协议终态事件（类型 ∈ terminalEvents）
+//   - truncated     已解析出事件但流解析中途失败（含末尾事件被截断、事件超长）
+//   - unclassified  解析失败 / 以上皆不匹配
+//
+// error_event 优先于 terminal：部分错误事件（如 response.failed）同时位于
+// TerminalEvents 中，按终态处理会把上游失败当成正常完成。解析失败不猜测、
+// 不 panic（OnFinish 在 safe.Go 之外执行）。重写自原 streamReachedTerminalEvent。
+func classifyPassthroughStreamEnd(rawStream []byte, terminalEvents, errorEvents map[string]struct{}) string {
 	if len(rawStream) == 0 {
-		return
-	}
-	outEventAdapter, outOk := ra.outAdapter.(model.OutboundStreamEventTransformer)
-	inEventAdapter, inOk := ra.inAdapter.(model.InboundStreamEventTransformer)
-	if outOk && inOk {
-		readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
-		for ev, err := range sse.Read(bytes.NewReader(rawStream), readCfg) {
-			if err != nil {
-				log.Debugf("openai responses passthrough metrics parse skipped: %v", err)
-				return
-			}
-			if events, terr := outEventAdapter.TransformStreamEvent(ctx, []byte(ev.Data)); terr == nil && len(events) > 0 {
-				_, _ = inEventAdapter.TransformStreamEvents(ctx, events)
-			}
-		}
-		return
+		return passthroughStreamEmpty
 	}
 	readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
+	eventCount := 0
+	sawTerminal := false
 	for ev, err := range sse.Read(bytes.NewReader(rawStream), readCfg) {
 		if err != nil {
-			log.Debugf("openai responses passthrough metrics parse skipped: %v", err)
-			return
+			// 中段解析失败：已看到终态视为完整流；有事件但未到终态视为截断；
+			// 一个事件都没解析出来则无法判断。
+			if sawTerminal {
+				return passthroughStreamTerminal
+			}
+			if eventCount > 0 {
+				return passthroughStreamTruncated
+			}
+			return passthroughStreamUnclassified
 		}
-		if internalStream, terr := ra.outAdapter.TransformStream(ctx, []byte(ev.Data)); terr == nil && internalStream != nil {
-			_, _ = ra.inAdapter.TransformStream(ctx, internalStream)
+
+		typ := strings.TrimSpace(ev.Type)
+		var probe struct {
+			Type  string          `json:"type"`
+			Error json.RawMessage `json:"error"`
 		}
+		_ = json.Unmarshal([]byte(ev.Data), &probe)
+		if typ == "" {
+			typ = strings.TrimSpace(probe.Type)
+		}
+
+		if _, ok := errorEvents[typ]; ok {
+			return passthroughStreamErrorEvent
+		}
+		// 未类型化的顶层 error 字段是 OpenAI 系的事实错误形状（协议错误形状检查，
+		// 非内容启发式）；显式 null 视为无错误。
+		if len(probe.Error) > 0 && string(probe.Error) != "null" {
+			return passthroughStreamErrorEvent
+		}
+		if _, ok := terminalEvents[typ]; ok {
+			// 不立即返回：后续事件中的错误事件应胜出终态。
+			sawTerminal = true
+		}
+		eventCount++
 	}
+	if eventCount == 0 {
+		return passthroughStreamEmpty
+	}
+	if sawTerminal {
+		return passthroughStreamTerminal
+	}
+	return passthroughStreamUnclassified
 }
 
-// responsesPassthroughTerminalEvents / anthropicPassthroughTerminalEvents 定义各协议
-// SSE 流的终态事件类型；缓存流中出现终态事件即视为上游响应已完整送达。
-var (
-	responsesPassthroughTerminalEvents = map[string]struct{}{
-		"response.completed":  {},
-		"response.failed":     {},
-		"response.incomplete": {},
-		"error":               {},
-	}
-	anthropicPassthroughTerminalEvents = map[string]struct{}{
-		"message_stop": {},
-		"error":        {},
-	}
+// classifyPassthroughStreamEnd 的返回值。relay.empty_stream 日志以该值为
+// empty_stream_kind 字段，便于按缺陷族聚合检索。
+const (
+	passthroughStreamEmpty        = "empty"
+	passthroughStreamErrorEvent   = "error_event"
+	passthroughStreamTerminal     = "terminal"
+	passthroughStreamTruncated    = "truncated"
+	passthroughStreamUnclassified = "unclassified"
 )
 
-// streamReachedTerminalEvent 报告缓存的原始 SSE 流是否已包含协议终态事件。
-// 客户端 SDK 收到终态事件后会立即断连而不等上游 EOF，断连取消会沿出站请求
-// 传播打断上游读取；此时读取被取消不代表流未完成。
-func streamReachedTerminalEvent(rawStream []byte, terminalTypes map[string]struct{}) bool {
-	if len(rawStream) == 0 {
+// isPassthroughEmptyStreamKind 报告该分类是否需要以 Warnw 级别记录。
+// terminal 属正常完成、unclassified 无法定论，均不打扰告警。
+func isPassthroughEmptyStreamKind(kind string) bool {
+	switch kind {
+	case passthroughStreamEmpty, passthroughStreamErrorEvent, passthroughStreamTruncated:
+		return true
+	default:
 		return false
-	}
-	readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
-	for ev, err := range sse.Read(bytes.NewReader(rawStream), readCfg) {
-		if err != nil {
-			break
-		}
-		typ := strings.TrimSpace(ev.Type)
-		if typ == "" {
-			var head struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal([]byte(ev.Data), &head) == nil {
-				typ = head.Type
-			}
-		}
-		if _, ok := terminalTypes[typ]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// forwardViaHTTPStandard 是 forwardViaHTTP 的原路径（直通判定失败时的兜底）。
-// 留作显式出口，避免 passthrough 失败时的递归。
-
-func (ra *relayAttempt) collectAnthropicPassthroughMetrics(ctx context.Context, rawStream []byte) {
-	if len(rawStream) == 0 {
-		return
-	}
-	outEventAdapter, outOk := ra.outAdapter.(model.OutboundStreamEventTransformer)
-	inEventAdapter, inOk := ra.inAdapter.(model.InboundStreamEventTransformer)
-	if outOk && inOk {
-		readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
-		for ev, err := range sse.Read(bytes.NewReader(rawStream), readCfg) {
-			if err != nil {
-				log.Debugf("anthropic passthrough metrics parse skipped: %v", err)
-				return
-			}
-			if events, terr := outEventAdapter.TransformStreamEvent(ctx, []byte(ev.Data)); terr == nil && len(events) > 0 {
-				_, _ = inEventAdapter.TransformStreamEvents(ctx, events)
-			}
-		}
-		return
-	}
-	readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
-	for ev, err := range sse.Read(bytes.NewReader(rawStream), readCfg) {
-		if err != nil {
-			log.Debugf("anthropic passthrough metrics parse skipped: %v", err)
-			return
-		}
-		if internalStream, terr := ra.outAdapter.TransformStream(ctx, []byte(ev.Data)); terr == nil && internalStream != nil {
-			_, _ = ra.inAdapter.TransformStream(ctx, internalStream)
-		}
 	}
 }

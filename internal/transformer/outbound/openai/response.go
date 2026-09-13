@@ -1923,6 +1923,13 @@ func (o *ResponseOutbound) CanPassthrough(inboundFormat model.APIFormat) bool {
 	return inboundFormat == model.APIFormatOpenAIResponse
 }
 
+// responsesPassthroughErrorEvents 列出 OpenAI Responses SSE 流中表示上游报错的事件类型。
+// 注意 response.incomplete 属于正常完成侧（长度截断），不在此列。
+var responsesPassthroughErrorEvents = map[string]struct{}{
+	"response.failed": {},
+	"error":           {},
+}
+
 // PassthroughConfig implements model.PassthroughCapable.
 // Returns OpenAI Responses-specific passthrough settings.
 func (o *ResponseOutbound) PassthroughConfig() model.PassthroughConfig {
@@ -1933,6 +1940,7 @@ func (o *ResponseOutbound) PassthroughConfig() model.PassthroughConfig {
 			"response.incomplete": {},
 			"error":               {},
 		},
+		ErrorEvents:    responsesPassthroughErrorEvents,
 		CollectMetrics: false, // OpenAI Responses uses different metrics semantics
 	}
 }

@@ -2037,6 +2037,11 @@ func (o *MessageOutbound) CanPassthrough(inboundFormat model.APIFormat) bool {
 	return inboundFormat == model.APIFormatAnthropicMessage
 }
 
+// anthropicPassthroughErrorEvents 列出 Anthropic Messages SSE 流中表示上游报错的事件类型。
+var anthropicPassthroughErrorEvents = map[string]struct{}{
+	"error": {},
+}
+
 // PassthroughConfig implements model.PassthroughCapable.
 // Returns Anthropic-specific passthrough settings.
 func (o *MessageOutbound) PassthroughConfig() model.PassthroughConfig {
@@ -2045,6 +2050,7 @@ func (o *MessageOutbound) PassthroughConfig() model.PassthroughConfig {
 			"message_stop": {},
 			"error":        {},
 		},
+		ErrorEvents:    anthropicPassthroughErrorEvents,
 		CollectMetrics: true, // Anthropic requires full response aggregation for metrics
 	}
 }

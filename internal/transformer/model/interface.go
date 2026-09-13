@@ -92,6 +92,13 @@ type PassthroughConfig struct {
 	// for OpenAI Responses), the relay can treat client disconnection as success rather than failure.
 	TerminalEvents map[string]struct{}
 
+	// ErrorEvents defines protocol-specific error event types for end-of-stream classification.
+	// Deliberately separate from TerminalEvents: some error events (e.g., "response.failed" for
+	// OpenAI Responses, "error" for Anthropic) are ALSO terminal events, but treating them as
+	// normal completion hides upstream failures. The relay logs streams ending in an error
+	// event instead of counting them as clean completions.
+	ErrorEvents map[string]struct{}
+
 	// CollectMetrics defines whether to call collectResponse() after passthrough stream ends.
 	// Set to true for protocols that require full response aggregation for cost/token tracking
 	// (Anthropic), false for protocols with different metrics semantics (OpenAI Responses).
