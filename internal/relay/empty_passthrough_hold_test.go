@@ -537,6 +537,93 @@ func TestPassthroughHoldUntypedChunkConservativeRelease(t *testing.T) {
 	}
 }
 
+// ---------- 灯下演练（窗口零）的代码级前置锁定 ----------
+//
+// 规程(ops-protocol 附录)要求演练验证三件事:开关不重启即生效、拼错值大声拒绝、
+// 在飞流不受中途翻转影响。三者都是可测的代码契约,先在此锁定,演练时只验证
+// 运维路径(API 调用、日志检索)。
+
+// 前置 1+2:开关动态生效——同一进程内,默认 OFF 与显式 OFF 等价,显式 ON 立即
+// 拦截壳流;此后翻回 OFF,新流立即恢复直通。
+func TestPassthroughHoldSwitchTakesEffectWithoutRestart(t *testing.T) {
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_dyn","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_dyn","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"completed"}}`,
+		"",
+		"",
+	}, "\n")
+
+	// OFF（默认）:直通。
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), ra.ptCfg()); err != nil {
+		t.Fatalf("OFF baseline must forward, got %v", err)
+	}
+	if recorder.Body.Len() == 0 {
+		t.Fatal("OFF baseline must forward shell payload")
+	}
+
+	// ON:立即生效,壳流保持,零字节。
+	enablePassthroughHoldForTest(t)
+	recorder.Body.Reset()
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), ra.ptCfg()); !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("ON must intercept shell stream immediately, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("ON must hold shell stream (zero bytes), got %q", recorder.Body.String())
+	}
+
+	// 翻回 OFF:新流立即恢复直通。
+	prev := emptyPassthroughHoldEnabled
+	emptyPassthroughHoldEnabled = func() bool { return false }
+	recorder.Body.Reset()
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), ra.ptCfg()); err != nil {
+		t.Fatalf("flip-back OFF must forward again, got %v", err)
+	}
+	if recorder.Body.Len() == 0 {
+		t.Fatal("flip-back OFF must forward shell payload again")
+	}
+	_ = prev
+}
+
+// 前置 3:在飞流不受中途翻转影响——开关在流建立时读一次(闭包持有 ptHold),
+// 流中途把开关翻 OFF 不改变本流的保持行为,壳流仍走到流尾终判。
+func TestPassthroughHoldInFlightStreamUnaffectedByMidStreamFlip(t *testing.T) {
+	enablePassthroughHoldForTest(t)
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_inflight","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_inflight","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"completed"}}`,
+		"",
+		"",
+	}, "\n")
+
+	// 流中途翻 OFF:开关是每流只读一次的变量(relay.go:1309 建立点),用
+	// "首次读返回 ON、此后一直 OFF"模拟翻转时序——建立读走 ON 后翻转即刻发生。
+	// 若实现中途重读(会拿到 OFF 并放行壳流),本流与零字节断言都会失败;
+	// 末尾同时锁定"每流恰读一次"契约。
+	reads := 0
+	prev := emptyPassthroughHoldEnabled
+	emptyPassthroughHoldEnabled = func() bool {
+		reads++
+		return reads == 1
+	}
+	defer func() { emptyPassthroughHoldEnabled = prev }()
+
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), ra.ptCfg()); !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("in-flight stream must keep the build-time ON decision, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("in-flight stream must stay held (zero bytes), got %q", recorder.Body.String())
+	}
+	if reads != 1 {
+		t.Fatalf("switch must be read exactly once per stream (at establishment), got %d reads", reads)
+	}
+}
+
 // splitSSEFrames 纯字节分帧的单元表征(单向收敛):\n\n 与 \r\n\r\n 混合边界、
 // 多帧单 chunk、半帧尾——无语义解释,锁定后供批次二统一。
 func TestSplitSSEFramesByteFraming(t *testing.T) {
