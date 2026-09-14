@@ -126,6 +126,7 @@ type relayAttempt struct {
 	usedKey              dbmodel.ChannelKey
 	firstTokenTimeOutSec int
 	firstTokenBudget     *firstTokenBudget
+	emptyRetryEnabled    bool          // 空输出保持与重试开关（Group.EmptyRetryEnabled，default false）
 	retryAfter           time.Duration // forward() 提取后暂存
 
 	// baseURL 是本次 attempt 实际使用的上游端点（由 resolveBaseURLs 在 attempt 层解析一次）。

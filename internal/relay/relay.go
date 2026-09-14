@@ -267,6 +267,10 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 		// 同通道重试循环
 		var result attemptResult
 		for retryNum := 0; retryNum < effectiveMaxRetries; retryNum++ {
+			// 尝试开始观测（空输出重试端口项）：与退避日志区分，标记每次 attempt 的起点，
+			// 便于从 Attempts[] 之外的日志直接还原重试序列。
+			log.Debugf("attempt start %d/%d for channel %s (model=%s)",
+				retryNum+1, effectiveMaxRetries, channel.Name, item.ModelName)
 			// 重试前等待退避
 			if retryNum > 0 {
 				delay := computeBackoff(retryNum, result.RetryAfter)
@@ -291,6 +295,7 @@ func Handler(inboundType inbound.InboundType, c *gin.Context) {
 				channel:              channel,
 				usedKey:              usedKey,
 				firstTokenTimeOutSec: group.FirstTokenTimeOut,
+				emptyRetryEnabled:    group.EmptyRetryEnabled,
 			}
 
 			result = ra.attempt()
@@ -737,6 +742,14 @@ func (ra *relayAttempt) forwardViaWS(ctx context.Context) (int, error) {
 		if ra.requestContext().Err() == nil {
 			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		}
+		// 空流（reasoning-only → ErrEmptyUpstreamStream）是同通道可重试信号，与 HTTP
+		// dispatcher 的 `return 0, err` 语义对齐（isRetryableStatus(0)=true）。reader
+		// 默认 statusCode=200（transport_ws.go），空流不经过任何改写点，原样返回会使
+		// ws_client 重试循环因 isRetryableStatus(200)=false 立即 break。其余错误保留
+		// reader.StatusCode()——上游 error 事件的状态码透传是有意设计（Team B 审计发现 1）。
+		if errors.Is(err, stream.ErrEmptyUpstreamStream) {
+			return 0, err
+		}
 		return reader.StatusCode(), err
 	}
 
@@ -785,6 +798,11 @@ func (ra *relayAttempt) retryViaFreshUpstreamWS(ctx context.Context, reqBody []b
 		if ra.requestContext().Err() == nil {
 			wsUpstreamPool.RecordWSFailure(ra.channel.ID, baseURLKey(ra.effectiveBaseURL()))
 		}
+		// 同 forwardViaWS：空流返回 0（可重试语义），其余保留 reader.StatusCode()
+		// 的透传语义（Team B 审计发现 1）。
+		if errors.Is(streamErr, stream.ErrEmptyUpstreamStream) {
+			return 0, streamErr, true
+		}
 		return reader.StatusCode(), streamErr, true
 	}
 	log.Debugf("fresh upstream WS redial succeeded (channel=%s, key=%d, previous_response_id=%s)",
@@ -809,9 +827,8 @@ func (ra *relayAttempt) handleWSStreamResponseV2(ctx context.Context, reader *ws
 	ra.heartbeat.Hand()
 
 	// Build transform function
-	transform := func(ctx context.Context, data []byte) ([]byte, error) {
-		return ra.transformStreamData(ctx, string(data))
-	}
+	hold := newEmptyOutputHold(ra.emptyRetryEnabled)
+	transform := hold.wrapTransform(ra)
 
 	// Determine first token timeout
 	var firstTokenTimeout time.Duration
@@ -827,6 +844,8 @@ func (ra *relayAttempt) handleWSStreamResponseV2(ctx context.Context, reader *ws
 		Context:           ctx,
 		FirstTokenTimeout: firstTokenTimeout,
 		HeartbeatInterval: streamHeartbeatInterval(),
+		// 同 handleStreamResponseV2：OFF 时不接线，legacy 定时器语义不变。
+		OnHeldChunk: holdOnHeldChunk(ra),
 		OnFirstToken: func() {
 			ra.metrics.SetFirstTokenTime(time.Now())
 			ra.stopFirstTokenTimer()
@@ -839,6 +858,12 @@ func (ra *relayAttempt) handleWSStreamResponseV2(ctx context.Context, reader *ws
 	// Track payload written for metrics collection
 	if processor.PayloadWritten() {
 		ra.streamPayloadWritten.Store(true)
+	}
+
+	// 断连残余观测（同 handleStreamResponseV2）。
+	if hold.holding() && hold.heldBytes() > 0 {
+		log.Debugf("empty-output hold discarded %d buffered bytes on ws stream end (written=%t)",
+			hold.heldBytes(), processor.PayloadWritten())
 	}
 
 	// Handle first token timeout specifically
@@ -1169,9 +1194,8 @@ func (ra *relayAttempt) handleStreamResponseV2(ctx context.Context, response *ht
 	ra.heartbeat.Hand()
 
 	// Build transform function
-	transform := func(ctx context.Context, data []byte) ([]byte, error) {
-		return ra.transformStreamData(ctx, string(data))
-	}
+	hold := newEmptyOutputHold(ra.emptyRetryEnabled)
+	transform := hold.wrapTransform(ra)
 
 	// Determine first token timeout
 	var firstTokenTimeout time.Duration
@@ -1187,6 +1211,9 @@ func (ra *relayAttempt) handleStreamResponseV2(ctx context.Context, response *ht
 		Context:           ctx,
 		FirstTokenTimeout: firstTokenTimeout,
 		HeartbeatInterval: streamHeartbeatInterval(),
+		// OnHeldChunk 仅在开关启用时接线（保持 chunk 才应重排首字计时）；
+		// OFF 时保持 nil，processor 的 held 分支整体短路，legacy 定时器语义不变。
+		OnHeldChunk: holdOnHeldChunk(ra),
 		OnFirstToken: func() {
 			ra.metrics.SetFirstTokenTime(time.Now())
 			ra.stopFirstTokenTimer()
@@ -1199,6 +1226,13 @@ func (ra *relayAttempt) handleStreamResponseV2(ctx context.Context, response *ht
 	// Track payload written for metrics collection
 	if processor.PayloadWritten() {
 		ra.streamPayloadWritten.Store(true)
+	}
+
+	// 断连残余观测：保持中的字节未写客户端（Written=false → 可重试），
+	// Run 返回后记录残余规模即可（Kleppmann 裁定：无需 cancel 分支守卫）。
+	if hold.holding() && hold.heldBytes() > 0 {
+		log.Debugf("empty-output hold discarded %d buffered bytes on stream end (written=%t)",
+			hold.heldBytes(), processor.PayloadWritten())
 	}
 
 	// Handle first token timeout specifically
@@ -1433,6 +1467,14 @@ func (ra *relayAttempt) handleResponse(ctx context.Context, response *http.Respo
 	if err != nil {
 		log.Warnf("failed to transform response: %v", err)
 		return fmt.Errorf("failed to transform outbound response: %w", err)
+	}
+
+	// 空输出检测（issue #155 端口）：上游返回 200 但所有 choice 均无可见内容。
+	// 不依赖 CompletionTokens 判断——推理模型可能 CompletionTokens > 0 但无可见内容。
+	// 返回 errEmptyOutput → StatusCode=0 → 走既有同通道重试链（与流式路径一致）。
+	if ra.emptyRetryEnabled && isEmptyOutputResponse(internalResponse) {
+		log.Infof("channel %s returned empty output (no visible content), will retry", ra.channelNameForLog())
+		return errEmptyOutput
 	}
 
 	inResponse, err := ra.inAdapter.TransformResponse(ctx, internalResponse)

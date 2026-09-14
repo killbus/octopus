@@ -571,6 +571,7 @@ func runWSRelay(ctx context.Context, req *relayRequest, group *dbmodel.Group) ws
 				channel:              channel,
 				usedKey:              usedKey,
 				firstTokenTimeOutSec: group.FirstTokenTimeOut,
+				emptyRetryEnabled:    group.EmptyRetryEnabled,
 			}
 
 			result = ra.attempt()

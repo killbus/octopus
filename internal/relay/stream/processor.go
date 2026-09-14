@@ -58,6 +58,7 @@ type StreamConfig struct {
 
 	// Callbacks
 	OnFirstToken func()                                            // Called when first payload written
+	OnHeldChunk  func()                                            // Called when transform held a chunk (empty-output hold); used to re-arm first token timer
 	OnFinish     func(ctx context.Context, rawStream []byte) error // Called on stream end
 
 	// Passthrough-specific
@@ -176,8 +177,23 @@ func (p *StreamProcessor) Run() error {
 			}
 
 			// Transform and write
-			if err := p.processEvent(r.data); err != nil {
+			held, err := p.processEvent(r.data)
+			if err != nil {
 				return err
+			}
+
+			// 空输出保持：chunk 被 transform 跳过时重置首字定时器（processor-timer 模式；
+			// budget 模式下 firstTokenTimer 为 nil，由 OnHeldChunk 回调重排预算定时器）。
+			// 仅在 OnHeldChunk 已接线（空输出重试启用）时生效——OFF 等价要求 legacy
+			// 跳过 chunk 保持既有定时器语义（不重排）。
+			if held && p.config.OnHeldChunk != nil && firstTokenTimer != nil {
+				if !firstTokenTimer.Stop() {
+					select {
+					case <-firstTokenTimer.C:
+					default:
+					}
+				}
+				firstTokenTimer.Reset(p.config.FirstTokenTimeout)
 			}
 
 			// First token handling
@@ -197,34 +213,41 @@ func (p *StreamProcessor) Run() error {
 					firstTokenC = nil
 				}
 			}
+
 		}
 	}
 }
 
 // processEvent transforms and writes a single event.
-func (p *StreamProcessor) processEvent(data []byte) error {
+// Returns held=true when the transform intentionally skipped the chunk
+// (empty-output hold — nothing written, first-token timer may be re-armed).
+func (p *StreamProcessor) processEvent(data []byte) (held bool, err error) {
 	var output []byte
-	var err error
 
 	if p.config.Transform != nil {
 		output, err = p.config.Transform(p.config.Context, data)
 		if err != nil {
-			return fmt.Errorf("transform error: %w", err)
+			return false, fmt.Errorf("transform error: %w", err)
 		}
 		if len(output) == 0 {
-			return nil // Skip empty output
+			// 空输出保持：transform 有意跳过该 chunk（未写入客户端），
+			// 通知回调重排首字计时，避免推理模型长 reasoning 期间被首字超时误杀。
+			if p.config.OnHeldChunk != nil {
+				p.config.OnHeldChunk()
+			}
+			return true, nil // Skip empty output
 		}
 	} else {
 		output = data // Passthrough
 	}
 
 	if _, err := p.config.Writer.Write(output); err != nil {
-		return fmt.Errorf("write error: %w", err)
+		return false, fmt.Errorf("write error: %w", err)
 	}
 
 	p.payloadWritten = true
 	p.config.Writer.Flush()
-	return nil
+	return false, nil
 }
 
 // writeHeartbeat sends SSE heartbeat (comment line).
