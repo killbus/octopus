@@ -3,9 +3,12 @@ package relay
 import "testing"
 
 // G5 探针采样判定表测试：确定性（同种子同结论）、边界全拒/全收、分布合理。
+// 复算契约：种子 = "api_key_id|channel_id|start_time_unix|model"，四成分全部
+// 出现在 relay.empty_stream_shadow 日志行内，采样结论可从日志逐行重建。
+// （round-5 P2：种子曾用 UnixNano，无日志对应物，确定性不可审计。）
 func TestShadowProbeSampled(t *testing.T) {
-	// 确定性：同输入同输出。
-	seed := "3|75|1726302810194000000|gpt-5.6-sol"
+	// 确定性：同输入同输出。种子样例即日志行的成分拼接。
+	seed := "3|75|1789394242|gpt-5.6-sol"
 	first := shadowProbeSampled(5, seed)
 	for i := 0; i < 100; i++ {
 		if shadowProbeSampled(5, seed) != first {

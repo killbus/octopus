@@ -1721,7 +1721,10 @@ func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int, end
 		"model", ra.requestModel,
 	}
 	if shadowProbeSamplePct > 0 {
-		seed := fmt.Sprintf("%d|%d|%d|%s", ra.apiKeyID, channelID, ra.metrics.StartTime.UnixNano(), ra.requestModel)
+		// 种子四成分与日志行一一对应（api_key_id|channel_id|start_time_unix|model），
+		// 采样结论可从 relay.empty_stream_shadow 日志逐行复算（round-5 P2：
+		// UnixNano 无日志对应物，采样确定性不可审计）。
+		seed := fmt.Sprintf("%d|%d|%d|%s", ra.apiKeyID, channelID, ra.metrics.StartTime.Unix(), ra.requestModel)
 		fields = append(fields, "probe", shadowProbeSampled(shadowProbeSamplePct, seed))
 	}
 	log.Infow("relay.empty_stream_shadow", fields...)
