@@ -229,8 +229,9 @@ func (h *passthroughOutputHold) observe(typ string, data []byte) passthroughHold
 	}
 	if _, ok := h.terminalEvents[typ]; ok {
 		// 终态块：解析本块 usage。合法空轮（output>0）→ 放行；output==0 或缺失
-		// （契约内 breach）→ 保持到流尾，OnFinish 终判。
-		usage := extractChunkOutputTokens(payload)
+		// （契约内 breach）→ 保持到流尾，OnFinish 终判。证据提取消费
+		// probeOutputTokenEvidence 单点原语（协议形状见其注释）。
+		usage := probeOutputTokenEvidence(payload)
 		if usage != nil && *usage > 0 {
 			return passthroughHoldRelease
 		}
@@ -240,42 +241,6 @@ func (h *passthroughOutputHold) observe(typ string, data []byte) passthroughHold
 	// 其余非空类型：输出证据（output_item.added / *.delta / done 等）→ 放行并
 	// 永久直通（由调用方在 Release 时置 holding=false）。
 	return passthroughHoldRelease
-}
-
-// extractChunkOutputTokens 从单 chunk 载荷提取 output_tokens（chat 顶层 usage 或
-// Responses 的 response.usage）。解析失败 / usage 缺失 → nil。
-func extractChunkOutputTokens(data []byte) *int64 {
-	var probe struct {
-		Response *struct {
-			Usage *struct {
-				OutputTokens     *int64 `json:"output_tokens"`
-				CompletionTokens *int64 `json:"completion_tokens"`
-			} `json:"usage"`
-		} `json:"response"`
-		Usage *struct {
-			OutputTokens     *int64 `json:"output_tokens"`
-			CompletionTokens *int64 `json:"completion_tokens"`
-		} `json:"usage"`
-	}
-	if json.Unmarshal(data, &probe) != nil {
-		return nil
-	}
-	var usage *struct {
-		OutputTokens     *int64 `json:"output_tokens"`
-		CompletionTokens *int64 `json:"completion_tokens"`
-	}
-	if probe.Usage != nil {
-		usage = probe.Usage
-	} else if probe.Response != nil {
-		usage = probe.Response.Usage
-	}
-	if usage == nil {
-		return nil
-	}
-	if usage.OutputTokens != nil {
-		return usage.OutputTokens
-	}
-	return usage.CompletionTokens
 }
 
 // hold 追加持有字节；超限返回 false（调用方 flush-degrade）。

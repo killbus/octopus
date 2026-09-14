@@ -49,9 +49,59 @@ const (
 	emptyUsagePositive
 )
 
+// probeOutputTokenEvidence 从单个 SSE 事件载荷提取 output-token 证据。
+// 协议形状（契约参数，写死在此单点——round-5 P2：三个提取器各写一份 JSON
+// 形状，一处漂移两处错）：
+//   - Responses：usage 挂在 response.usage（response.completed 载荷）；
+//   - chat completions：usage 挂在载荷顶层（最终 chunk）；
+//   - 字段：output_tokens 优先（Responses 原生），缺失时 fallback 到
+//     completion_tokens（chat 原生）。
+//
+// 返回 nil = absent（载荷不可解析，或 usage 对象缺失）。
+func probeOutputTokenEvidence(data []byte) *int64 {
+	var probe struct {
+		Response *struct {
+			Usage *struct {
+				OutputTokens     *int64 `json:"output_tokens"`
+				CompletionTokens *int64 `json:"completion_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+		Usage *struct {
+			OutputTokens     *int64 `json:"output_tokens"`
+			CompletionTokens *int64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(data, &probe) != nil {
+		return nil
+	}
+	usage := probe.Usage
+	if usage == nil && probe.Response != nil {
+		usage = probe.Response.Usage
+	}
+	if usage == nil {
+		return nil
+	}
+	if usage.OutputTokens != nil {
+		return usage.OutputTokens
+	}
+	return usage.CompletionTokens
+}
+
+// classifyOutputTokenEvidence 判别核心：output-token 证据 → usage 形态。
+// nil → absent（未知，NULL≠0）；0 → zero（缺陷在场形态）；>0 → positive（健康）。
+func classifyOutputTokenEvidence(tokens *int64) emptyUsageVerdict {
+	if tokens == nil {
+		return emptyUsageAbsent
+	}
+	if *tokens == 0 {
+		return emptyUsageZero
+	}
+	return emptyUsagePositive
+}
+
 // observeEmptyStreamUsage 从流尾终态载荷中提取 usage 形态。只读，不修改流。
-// 逐事件扫描：取第一个含 usage 字段的终态/任意载荷（Responses 的 usage 挂在
-// response.completed 的 response 对象上；chat completions 的最终 chunk 自带 usage）。
+// 逐事件扫描：取第一个携带 output-token 证据的载荷（协议形状见
+// probeOutputTokenEvidence——双位双字段提取收敛在该单点）。
 func observeEmptyStreamUsage(rawStream []byte) emptyUsageVerdict {
 	if len(rawStream) == 0 {
 		return emptyUsageAbsent
@@ -61,33 +111,9 @@ func observeEmptyStreamUsage(rawStream []byte) emptyUsageVerdict {
 		if err != nil {
 			return emptyUsageAbsent
 		}
-		var probe struct {
-			Response *struct {
-				Usage *struct {
-					OutputTokens *int64 `json:"output_tokens"`
-				} `json:"usage"`
-			} `json:"response"`
-			Usage *struct {
-				OutputTokens *int64 `json:"output_tokens"`
-			} `json:"usage"`
+		if tokens := probeOutputTokenEvidence([]byte(ev.Data)); tokens != nil {
+			return classifyOutputTokenEvidence(tokens)
 		}
-		if json.Unmarshal([]byte(ev.Data), &probe) != nil {
-			continue
-		}
-		usage := probe.Usage
-		if usage == nil && probe.Response != nil {
-			usage = probe.Response.Usage
-		}
-		if usage == nil {
-			continue
-		}
-		if usage.OutputTokens == nil {
-			return emptyUsageAbsent
-		}
-		if *usage.OutputTokens == 0 {
-			return emptyUsageZero
-		}
-		return emptyUsagePositive
 	}
 	return emptyUsageAbsent
 }
@@ -225,24 +251,36 @@ const (
 	emptyFailureFailure
 )
 
+// usageVerdictToFailure 是 emptyUsageVerdict（usage 形态）与 emptyFailureVerdict
+// （failure 裁决）之间的唯一映射桥（round-5 P2：两套裁决同构 absent↔unknown、
+// zero↔failure、positive↔healthy，映射收敛在单点，阅读者不再脑内换算）。
+// visible 只豁免 zero 形态（usage 全零但可见内容在场：矛盾形态，不判 failure）。
+func usageVerdictToFailure(v emptyUsageVerdict, visible bool) emptyFailureVerdict {
+	switch v {
+	case emptyUsageAbsent:
+		return emptyFailureUnknown
+	case emptyUsageZero:
+		if visible {
+			return emptyFailureHealthy
+		}
+		return emptyFailureFailure
+	default:
+		return emptyFailureHealthy
+	}
+}
+
 // evaluateEmptyStreamFailure 合取谓词（Kleppmann 裁定 + research 先例）：
 // 零可见 ∧ usage 在场 ∧ output_tokens==0 → failure；usage 健康 → healthy；
 // usage 缺失 → unknown（不触发，仅观测）。
+// 判别「零 vs 正」的边界消费 classifyOutputTokenEvidence 单点核心。
 // 合同相对性（缺失=breach）暂不启用：transform 路径传 nil usage 即 unknown，
 // 待影子期（G5）证实桥不剥离 usage 后再决定翻转既有 characterization。
 func evaluateEmptyStreamFailure(visible bool, usage *model.Usage) emptyFailureVerdict {
 	if usage == nil {
 		return emptyFailureUnknown
 	}
-	if usage.CompletionTokens > 0 {
-		return emptyFailureHealthy
-	}
-	if visible {
-		// usage 全零但可见内容在场：矛盾形态，不判 failure（gate 调用点不可达，
-		// 保留给直接调用者防御）。
-		return emptyFailureHealthy
-	}
-	return emptyFailureFailure
+	completion := usage.CompletionTokens
+	return usageVerdictToFailure(classifyOutputTokenEvidence(&completion), visible)
 }
 
 // heldUnit 一次保持的已解码上游 chunk——已经出站解码（观测所需；outAdapter 为
