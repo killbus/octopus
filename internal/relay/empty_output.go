@@ -152,8 +152,9 @@ func isEmptyOutputResponse(resp *model.InternalLLMResponse) bool {
 
 // chunkObservation 对已解码上游 chunk 的保持策略分类结果。
 type chunkObservation struct {
-	visible  bool // 携带客户端可见载荷（文本 / 工具调用）
-	terminal bool // 携带 finish_reason（终态块）
+	visible  bool        // 携带客户端可见载荷（文本 / 工具调用）
+	terminal bool        // 携带 finish_reason（终态块）
+	usage    *model.Usage // 终态批内携带的 usage 证据（UsageDelta 事件 / 最终 chunk），可缺失
 }
 
 // observeStreamChunk 分类响应路径（TransformStream）的解码 chunk。
@@ -170,11 +171,18 @@ func observeStreamChunk(resp *model.InternalLLMResponse) chunkObservation {
 			obs.terminal = true
 		}
 	}
+	// chat-completions 的 usage 挂在最终 chunk 顶层（choices 为空的 aux chunk，
+	// 或同 chunk 双角色）；Responses 的 usage 在事件路径单独提取。
+	if resp.Usage != nil {
+		obs.usage = resp.Usage
+	}
 	return obs
 }
 
 // observeStreamEvents 分类事件路径（TransformStreamEvent）的解码事件。
-// 可见 = TextDelta（含 Refusal）/ ToolCallStart / ToolCallDelta；终态 = MessageStop。
+// 可见 = TextDelta（含 Refusal）/ ToolCallStart / ToolCallDelta；终态 = MessageStop；
+// usage = UsageDelta（Responses completed 事件展开为 [MessageStop, UsageDelta] 同批到达，
+// 终态决策时刻证据就在手上）。
 func observeStreamEvents(events []model.StreamEvent) chunkObservation {
 	var obs chunkObservation
 	for _, ev := range events {
@@ -183,9 +191,46 @@ func observeStreamEvents(events []model.StreamEvent) chunkObservation {
 			obs.visible = true
 		case model.StreamEventKindMessageStop:
 			obs.terminal = true
+		case model.StreamEventKindUsageDelta:
+			obs.usage = ev.Usage
 		}
 	}
 	return obs
+}
+
+// emptyFailureVerdict 纯判别器的三方共享裁决（G4，Feathers：shadow / gate / 未来
+// passthrough hold 共用同一谓词，杜绝三处各写一份漂移）。
+type emptyFailureVerdict int
+
+const (
+	// emptyFailureUnknown usage 缺失（契约外或桥剥离）——NULL≠0，保守放行不触发。
+	emptyFailureUnknown emptyFailureVerdict = iota
+	// emptyFailureHealthy usage 在场且 output_tokens>0——与零可见矛盾时以 usage 为准
+	//（合法空轮 / reasoning-only 的 output ≥ 推理 token > 0，research #40200）。
+	emptyFailureHealthy
+	// emptyFailureFailure usage 在场且 output_tokens==0——记账自证的空流缺陷
+	//（research #155 形态，new-api ValidUsage 同判）。
+	emptyFailureFailure
+)
+
+// evaluateEmptyStreamFailure 合取谓词（Kleppmann 裁定 + research 先例）：
+// 零可见 ∧ usage 在场 ∧ output_tokens==0 → failure；usage 健康 → healthy；
+// usage 缺失 → unknown（不触发，仅观测）。
+// 合同相对性（缺失=breach）暂不启用：transform 路径传 nil usage 即 unknown，
+// 待影子期（G5）证实桥不剥离 usage 后再决定翻转既有 characterization。
+func evaluateEmptyStreamFailure(visible bool, usage *model.Usage) emptyFailureVerdict {
+	if usage == nil {
+		return emptyFailureUnknown
+	}
+	if usage.CompletionTokens > 0 {
+		return emptyFailureHealthy
+	}
+	if visible {
+		// usage 全零但可见内容在场：矛盾形态，不判 failure（gate 调用点不可达，
+		// 保留给直接调用者防御）。
+		return emptyFailureHealthy
+	}
+	return emptyFailureFailure
 }
 
 // heldUnit 一次保持的已解码上游 chunk——已经出站解码（观测所需；outAdapter 为
@@ -339,6 +384,17 @@ func (h *emptyOutputHold) wrapTransform(ra *relayAttempt) stream.StreamTransform
 						return nil, nil // 保持：不入站编码，inAdapter 零接触
 					}
 					h.capped = true // flush 点 ⑥：超限降级
+				}
+				// R2 闸门 usage 维度（G4）：终态 ∧ 零可见 ∧ usage 指证空
+				// （CompletionTokens==0，#155 记账自证形态）→ 不 flush，保持到流尾，
+				// finalize 判 ErrEmptyUpstreamStream 走既有重试链。usage 健康 / 缺失
+				// （#40200 合法空轮 / 桥剥离）→ 现状 flush（保守放行）。
+				if obs.terminal && !obs.visible &&
+					evaluateEmptyStreamFailure(false, obs.usage) == emptyFailureFailure {
+					if h.hold(unit, len(data)) {
+						return nil, nil // 缺陷证据成立：终态块一并保持，流尾空判定
+					}
+					h.capped = true
 				}
 				// flush 点 ①/④/⑥：可见 / 终态 / 超限 → 编码全部 + 当前，合并 Write
 				return h.flush(ctx, ra, unit)

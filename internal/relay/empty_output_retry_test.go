@@ -111,6 +111,59 @@ func TestEmptyRetryFinishReasonFlushesHeldBytes(t *testing.T) {
 	}
 }
 
+// G4 集成：transform 路径 shell 流（终态 + 零输出事件 + usage 在场且 output==0）。
+// R2 闸门从「finish_reason 即放行」演进为「finish_reason ∧ 判别器通过」——usage
+// 指证空时不 flush，流尾 ErrEmptyUpstreamStream 走既有同通道重试链。
+// 对照：usage 缺失的同一形态维持既有 characterization（unknown 保守放行，
+// TestEmptyRetryFinishReasonFlushesHeldBytes 不变）。
+func TestEmptyRetryShellStreamWithZeroUsageRetries(t *testing.T) {
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	ra.emptyRetryEnabled = true
+
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"completed","usage":{"input_tokens":194000,"output_tokens":0,"total_tokens":194000}}}`,
+		"",
+	}, "\n")
+	if err := ra.handleStreamResponseV2(context.Background(), sseTestResponse(body)); !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("expected shell stream (usage output==0) to retry, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("expected nothing forwarded (all held to stream end), got %q", recorder.Body.String())
+	}
+	if ra.streamPayloadWritten.Load() {
+		t.Fatalf("expected payloadWritten=false")
+	}
+}
+
+// G4 对照组：终态 + 零输出事件但 output_tokens>0（#40200 合法空轮）——判别器
+// healthy，保持既有放行语义（不重试），reasoning 照常到达客户端。
+func TestEmptyRetryCompletedWithPositiveUsageForwards(t *testing.T) {
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	ra.emptyRetryEnabled = true
+
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"only reasoning"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"completed","usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}`,
+		"",
+	}, "\n")
+	if err := ra.handleStreamResponseV2(context.Background(), sseTestResponse(body)); err != nil {
+		t.Fatalf("expected legit empty turn (output>0) to forward, got %v", err)
+	}
+	if !strings.Contains(recorder.Body.String(), "only reasoning") {
+		t.Fatalf("expected reasoning forwarded, got %q", recorder.Body.String())
+	}
+	if !ra.streamPayloadWritten.Load() {
+		t.Fatalf("expected payloadWritten=true")
+	}
+}
+
 func TestEmptyRetryCapDegradesToPassthrough(t *testing.T) {
 	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
 	ra.emptyRetryEnabled = true
