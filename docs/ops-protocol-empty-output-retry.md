@@ -232,26 +232,57 @@ absent rulings may only cite shadow rows from G6-OFF (or G6-less) channels.
 演练目的：验证 G6 开关全生命周期可由**非修复者**操作，演练通过后由运维宣布
 窗口起点。此前积累的影子数据一律按垃圾时间排除，不得进入裁决。
 
+> round-5 走查修订（Nottingham/Kleppmann/Deming/Feathers/Hightower 合裁）：
+> 第一版手册的操作面按记忆书写（路由写错）且步骤③预期与实现相反，均在
+> 走查中裁定后按代码修订。本版操作面逐条对照 router/handler 原文。
+
 **前置锁定（代码级，已入测试）**
 
 1. 开关动态生效：`TestPassthroughHoldSwitchTakesEffectWithoutRestart`
    （不重启翻 ON 拦截、翻 OFF 恢复直通）。
 2. 拼错布尔值大声拒绝：`TestSettingBooleanValidation`
-   （API 层 400,报文含 true or false）。
+   （model 层校验；API 层 400 依赖 `setSetting` → `Validate()` 链）。
 3. 在飞流不受中途翻转影响：`TestPassthroughHoldInFlightStreamUnaffectedByMidStreamFlip`
    （建立点每流恰读一次,首读 ON 后中途翻 OFF 不放行）。
+4. 关联键等式：`TestShadowLogJoinKeyMatchesRelayLogTime`
+   （hold_failure/shadow 行 `start_time_unix` == `metrics.StartTime.Unix()`,
+   与 RelayLog `Time` 字段同源;四元组消歧字段在场）。
+
+**操作面（对照 handlers/setting.go 原文）**
+
+- 写入:`POST /api/v1/setting/set`,JSON 体 `{"key":"empty_passthrough_hold_enabled","value":"true"}`,
+  需 admin JWT(`middleware.Auth()` 组级挂载)与 `Content-Type: application/json`
+  （`RequireJSON()`）。
+- 读回:`GET /api/v1/setting/list`(同鉴权),在返回列表中查找该键;终验以数据库
+  `settings` 表直查为准(面板读的是驱动开关的同一进程缓存,半循环验证)。
 
 **演练步骤（生产/预发,按序,全部通过才宣布窗口起点）**
 
-1. 翻开关不重启:`POST /api/settings` 把
-   `empty_passthrough_hold_enabled` 置 `true`,预期 200,服务不重启。
-2. 拼错值大声拒绝:同一接口把值改为 `"1"`,预期 400,报文含
-   `true or false`。
-3. 影子随开关停止:置 `false` 后,`relay.empty_stream_shadow` 日志停止新增
-   （在飞流收尾后）。
-4. 日志关联键:在日志面板用 `start_time_unix` 关联 RelayLog 明细,确认能
-   命中同流记录（键值 = RelayLog `Time` 字段秒值）。
-5. 翻回:确认 `empty_passthrough_hold_enabled` 恢复 `false`。
+1. 翻开关不重启:按操作面把 `empty_passthrough_hold_enabled` 置 `true`,
+   预期 200,服务不重启（观测面:进程无重启,API 连续可用）。
+2. 拼错值大声拒绝:同一接口把 value 改为 `"1"`,预期 400,报文体**逐字含**
+   `setting value must be true or false`（截取报文原文回贴）。
+3. hold 行为随开关停止(先正控再负控):
+   - 正控(ON 期):注入一条空壳流（如轻量请求经无输出通道）,亲见拦截证据——
+     客户端零字节 + `relay.empty_stream_hold_failure` 新增一行;
+   - 负控(OFF 期):置 `false`,等在飞流收尾（以最后一条在飞流的 RelayLog
+     终态行落库为准,兜底最长流 + 2 分钟）,注入同款壳流,亲见直通——
+     payload 原样到达客户端,`relay.empty_stream_hold_failure` 不再新增。
+   - 无对照流量的通过视为空洞,判 FAIL（「停止新增」与「本无空流」不可区分,
+     NULL≠0）。注:`relay.empty_stream_shadow` 是无条件观测仪,不随开关停止,
+     不作本步判据。
+4. 日志关联键:取第 3 步正控行的 `start_time_unix`,关联 RelayLog 明细
+   （`Time` 字段同值）,并用四元组 `(api_key_id, channel_id, start_time_unix, model)`
+   消歧同秒并发;断言命中唯一同流记录。注意落库经异步 flush,立即关联可能
+   扑空,等待落库后重查。
+5. 翻回:按操作面读回,确认 `empty_passthrough_hold_enabled` 恢复 `false`。
 
-**执行人**：非修复者。演练结果(五步各 PASS/FAIL)回贴到 graduation
-dashboard 的窗口零条目，作为宣布窗口起点的依据。
+**执行人与记录**：非修复者执行,一名见证复核。每次置值记录时间戳;五步各
+PASS/FAIL **附命令与原始输出**回贴 graduation dashboard 窗口零条目。
+
+**回炉路径**：任一步 FAIL → 立即翻回 `false`（全程翻设置不重启,回滚安全）→
+失败区间连同此前影子数据一并计入垃圾时间 → 修订规程 → 同规程重跑;两次
+重跑仍 FAIL → 升级为设计问题,回到毕业判据修订,不进入窗口。
+
+**遗留（不阻塞演练,阻塞毕业）**：①的端到端开关测试（经 `SettingGetBool`
+→ settingCache 真接缝,变量替换测试绕开了该缝）列为 P2 补齐项。
