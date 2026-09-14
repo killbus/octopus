@@ -7,6 +7,7 @@ import (
 
 	dbmodel "github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/op"
+	"github.com/bestruirui/octopus/internal/transformer/model"
 )
 
 // emptyPassthroughHoldEnabled 读取 G6 实验开关（系统设置，默认 OFF：设置缺失时
@@ -38,6 +39,14 @@ var emptyPassthroughHoldEnabled = func() bool {
 // 8 MiB 上限超限 → flush-degrade 降级为直通（held 字节是完整 SSE 帧，绝不截断，
 // 与 maxEmptyOutputHoldBytes 同契约）。
 type passthroughOutputHold struct {
+	// voidPrefix / errorEvents / terminalEvents：事件分类法（批次二③，Nottingham）。
+	// 持有来自 PassthroughConfig 的协议分类法，替代此前硬编码的
+	// response.created/in_progress 知识——Anthropic 等其他 PassthroughCapable
+	// 协议由此获得同构的 G6 行为。
+	voidPrefixEvents map[string]struct{}
+	errorEvents      map[string]struct{}
+	terminalEvents   map[string]struct{}
+
 	buf       bytes.Buffer // 持有的 void-prefix 原始字节（flush 时先行写入）
 	pending   []byte       // 上一 chunk 的未完成 SSE 帧尾（与下一 chunk 合并解析）
 	heldBytes int          // 持有的原始 chunk 字节（buf+pending 总量，cap 依据）
@@ -49,8 +58,13 @@ type passthroughOutputHold struct {
 	sawSuspect bool
 }
 
-func newPassthroughOutputHold() *passthroughOutputHold {
-	return &passthroughOutputHold{holding: true}
+func newPassthroughOutputHold(cfg model.PassthroughConfig) *passthroughOutputHold {
+	return &passthroughOutputHold{
+		voidPrefixEvents: cfg.VoidPrefixEvents,
+		errorEvents:      cfg.ErrorEvents,
+		terminalEvents:   cfg.TerminalEvents,
+		holding:          true,
+	}
 }
 
 // passthroughHoldAction 是 Transform 对单个上游 chunk 的处置决策。
@@ -74,7 +88,8 @@ const (
 //
 // 单向收敛（Nottingham round-5）：本函数只做字节分帧（splitSSEFrames），事件
 // 语义（这个帧是什么事件、该 Keep 还是 Release）全部归 observe——见其注释。
-func (h *passthroughOutputHold) transform(data []byte, terminalEvents, errorEvents map[string]struct{}) ([]byte, error) {
+// 分类法（voidPrefix/error/terminal 集合）在构造时持有，调用点零参数。
+func (h *passthroughOutputHold) transform(data []byte) ([]byte, error) {
 	if !h.holding {
 		return data, nil // 已直通
 	}
@@ -86,7 +101,7 @@ func (h *passthroughOutputHold) transform(data []byte, terminalEvents, errorEven
 	sawRelease := false
 	frames, rest := splitSSEFrames(combined)
 	for _, frame := range frames {
-		if h.observe(sseFrameEventType(frame), frame, terminalEvents, errorEvents) == passthroughHoldRelease {
+		if h.observe(sseFrameEventType(frame), frame) == passthroughHoldRelease {
 			sawRelease = true
 		}
 	}
@@ -178,16 +193,23 @@ func observeChunkPayload(data []byte) []byte {
 
 // observe 决策单个已解析 chunk,是事件语义的唯一所有者(单向收敛,Nottingham
 // round-5):错误事件 / 终态 / void-prefix / 输出证据的分类判定全部在此,transform
-// 只喂帧不做解释。event 为空 / 不可解析时保守放行(flush-degrade,与分类器的
-// 「不猜测」一致——保持中收到的任何含糊输入都不该演变成静默截断)。批次二将按
-// SSE 规范把注释帧(无事件语义)从「不可解析」中分出为 Keep;本函数是唯一翻转点。
-func (h *passthroughOutputHold) observe(typ string, data []byte, terminalEvents, errorEvents map[string]struct{}) passthroughHoldAction {
+// 只喂帧不做解释。分类法来自构造时持有的 PassthroughConfig（批次二③）。
+//
+// 批次二②（本函数落地的翻转）：纯注释帧（": ..." / 空行帧，SSE 规范中无事件
+// 语义的保活帧）从「不可解析保守放行」中分出为 Keep——注释帧不是含糊输入，
+// 是规范定义的「将被忽略」帧；持有它不影响任何证据判定。malformed JSON 仍
+// 保守放行（真含糊输入不该演变成静默截断）。
+func (h *passthroughOutputHold) observe(typ string, data []byte) passthroughHoldAction {
 	if !h.holding {
 		return passthroughHoldRelease
 	}
 	payload := observeChunkPayload(data)
 	if typ == "" {
-		// 未类型化 chunk：尝试从载荷提取 type；仍为空则保守放行。
+		// 未类型化 chunk：先分出注释帧（无 data 行或 data 为空——SSE 规范的
+		// 忽略语义），再尝试从载荷提取 type；仍为空则保守放行。
+		if len(payload) == 0 {
+			return passthroughHoldKeep
+		}
 		var probe struct {
 			Type string `json:"type"`
 		}
@@ -197,15 +219,15 @@ func (h *passthroughOutputHold) observe(typ string, data []byte, terminalEvents,
 			return passthroughHoldRelease
 		}
 	}
-	if _, ok := errorEvents[typ]; ok {
+	if _, ok := h.errorEvents[typ]; ok {
 		// 错误事件：flush（处置维持现状——载荷透传 + error_event 告警，G6 不改变）。
 		return passthroughHoldRelease
 	}
-	if typ == "response.created" || typ == "response.in_progress" {
-		// void-prefix 元事件：无输出语义（与分类器的证据判定同构），持有。
+	if _, ok := h.voidPrefixEvents[typ]; ok {
+		// void-prefix 元事件：无输出语义（协议声明的信封生命周期事件），持有。
 		return passthroughHoldKeep
 	}
-	if _, ok := terminalEvents[typ]; ok {
+	if _, ok := h.terminalEvents[typ]; ok {
 		// 终态块：解析本块 usage。合法空轮（output>0）→ 放行；output==0 或缺失
 		// （契约内 breach）→ 保持到流尾，OnFinish 终判。
 		usage := extractChunkOutputTokens(payload)

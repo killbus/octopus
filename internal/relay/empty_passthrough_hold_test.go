@@ -111,7 +111,7 @@ func TestPassthroughHoldCapDegradesToPassthrough(t *testing.T) {
 	// 大体积 void-prefix 不可能（created/in_progress 很小）——用未类型化大块触发
 	// 保守放行路径之外的 cap 检查：observe 对未类型化空 type 先保守放行，因此
 	// 用 created 后跟超长 in_progress 风格块不现实。直接对 hold 状态机注入：
-	hold := newPassthroughOutputHold()
+	hold := newPassthroughOutputHold(responsesTestConfig())
 	if !hold.hold([]byte(strings.Repeat("x", 50))) {
 		t.Fatal("small chunk should be held")
 	}
@@ -152,8 +152,7 @@ func (ra *relayAttempt) ptCfg() transformerModel.PassthroughConfig {
 
 // 判别器单元表：observe 决策矩阵。
 func TestPassthroughHoldObserveMatrix(t *testing.T) {
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
+	h := newPassthroughOutputHold(responsesTestConfig())
 
 	cases := []struct {
 		name     string
@@ -171,17 +170,36 @@ func TestPassthroughHoldObserveMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newPassthroughOutputHold()
-			if got := h.observe(tc.typ, []byte(tc.data), terminal, errs); got != tc.expected {
+			h2 := newPassthroughOutputHold(responsesTestConfig())
+			if got := h2.observe(tc.typ, []byte(tc.data)); got != tc.expected {
 				t.Fatalf("expected action %d, got %d", tc.expected, got)
 			}
 		})
 	}
 
-	// 未类型化 chunk 的保守放行。
-	h := newPassthroughOutputHold()
-	if got := h.observe("", []byte(`not json`), terminal, errs); got != passthroughHoldRelease {
-		t.Fatalf("untyped chunk must release conservatively, got %d", got)
+	// 批次二②翻转后的两类未类型化帧：
+	// - 注释帧（无 data 行，SSE 规范忽略语义）→ Keep；
+	// - malformed data 帧（data 行但 JSON 不可解析）→ 保守放行不变。
+	if got := h.observe("", []byte(": ping - 1726300000\n\n")); got != passthroughHoldKeep {
+		t.Fatalf("comment frame must keep (SSE ignore semantics), got %d", got)
+	}
+	if got := h.observe("", []byte("data: not json\n\n")); got != passthroughHoldRelease {
+		t.Fatalf("malformed data frame must release conservatively, got %d", got)
+	}
+}
+
+// responsesTestConfig 构造与 openai.ResponseOutbound 等价的 Responses 分类法
+//（测试不依赖适配器注册表时使用）。
+func responsesTestConfig() transformerModel.PassthroughConfig {
+	return transformerModel.PassthroughConfig{
+		TerminalEvents: map[string]struct{}{
+			"response.completed":  {},
+			"response.failed":     {},
+			"response.incomplete": {},
+			"error":               {},
+		},
+		ErrorEvents:      map[string]struct{}{"response.failed": {}, "error": {}},
+		VoidPrefixEvents: map[string]struct{}{"response.created": {}, "response.in_progress": {}},
 	}
 }
 
@@ -279,20 +297,17 @@ func TestPassthroughHoldTruncatedStreamStaysOutOfUsageBucket(t *testing.T) {
 // 闩锁单元：observe 的 Suspect 分支置位 sawSuspect；Keep 分支不置位。
 // 字节经 transform 流转（observe 单元直调不经过 hold(frames)，buf 恒空）。
 func TestPassthroughHoldSuspectLatch(t *testing.T) {
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
-
-	h := newPassthroughOutputHold()
-	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n"), terminal, errs); err != nil {
+	h := newPassthroughOutputHold(responsesTestConfig())
+	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n")); err != nil {
 		t.Fatalf("transform keep chunk failed: %v", err)
 	}
 	if h.suspect_() {
 		t.Fatal("keep branch must not set sawSuspect latch")
 	}
-	if got := h.observe("response.created", []byte(`{}`), terminal, errs); got != passthroughHoldKeep {
+	if got := h.observe("response.created", []byte(`{}`)); got != passthroughHoldKeep {
 		t.Fatalf("void-prefix must keep, got %d", got)
 	}
-	if _, err := h.transform([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"), terminal, errs); err != nil {
+	if _, err := h.transform([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")); err != nil {
 		t.Fatalf("transform suspect chunk failed: %v", err)
 	}
 	if !h.suspect_() {
@@ -316,14 +331,12 @@ func TestPassthroughHoldSuspectLatch(t *testing.T) {
 
 // created 帧拆两 chunk:半帧尾挂 pending,下 chunk 补全 → 全部 keep,零字节放行。
 func TestPassthroughHoldSplitVoidPrefixAcrossChunks(t *testing.T) {
-	h := newPassthroughOutputHold()
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
+	h := newPassthroughOutputHold(responsesTestConfig())
 
 	full := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"status\":\"in_progress\"}}\n\n"
 	split := strings.Index(full, "\"status\"")
 
-	out1, err := h.transform([]byte(full[:split]), terminal, errs)
+	out1, err := h.transform([]byte(full[:split]))
 	if err != nil {
 		t.Fatalf("partial created chunk failed: %v", err)
 	}
@@ -334,7 +347,7 @@ func TestPassthroughHoldSplitVoidPrefixAcrossChunks(t *testing.T) {
 		t.Fatal("hold must survive a pending half-frame")
 	}
 
-	out2, err := h.transform([]byte(full[split:]), terminal, errs)
+	out2, err := h.transform([]byte(full[split:]))
 	if err != nil {
 		t.Fatalf("completed half of created frame failed: %v", err)
 	}
@@ -348,11 +361,9 @@ func TestPassthroughHoldSplitVoidPrefixAcrossChunks(t *testing.T) {
 
 // suspect 终态拆 chunk:补全后 observe 命中 Suspect,闩锁与保持语义不因拆帧漂移。
 func TestPassthroughHoldSplitSuspectTerminalAcrossChunks(t *testing.T) {
-	h := newPassthroughOutputHold()
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
+	h := newPassthroughOutputHold(responsesTestConfig())
 
-	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n"), terminal, errs); err != nil {
+	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n")); err != nil {
 		t.Fatalf("created chunk failed: %v", err)
 	}
 	if h.suspect_() {
@@ -362,14 +373,14 @@ func TestPassthroughHoldSplitSuspectTerminalAcrossChunks(t *testing.T) {
 	full := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\"}}\n\n"
 	split := strings.Index(full, "\"status\"")
 
-	if _, err := h.transform([]byte(full[:split]), terminal, errs); err != nil {
+	if _, err := h.transform([]byte(full[:split])); err != nil {
 		t.Fatalf("partial terminal chunk failed: %v", err)
 	}
 	if h.suspect_() {
 		t.Fatal("half frame must not be observed yet")
 	}
 
-	if _, err := h.transform([]byte(full[split:]), terminal, errs); err != nil {
+	if _, err := h.transform([]byte(full[split:])); err != nil {
 		t.Fatalf("terminal completion failed: %v", err)
 	}
 	if !h.suspect_() {
@@ -383,16 +394,14 @@ func TestPassthroughHoldSplitSuspectTerminalAcrossChunks(t *testing.T) {
 // keep 帧后输出事件到达:flush 载荷按原始字节序包含 created 与 delta,
 // 此后永久直通(再喂 chunk 原样透传)。
 func TestPassthroughHoldReleaseFlushKeepsOriginalOrder(t *testing.T) {
-	h := newPassthroughOutputHold()
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
+	h := newPassthroughOutputHold(responsesTestConfig())
 
-	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n"), terminal, errs); err != nil {
+	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n")); err != nil {
 		t.Fatalf("created chunk failed: %v", err)
 	}
 
 	delta := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
-	out, err := h.transform([]byte(delta), terminal, errs)
+	out, err := h.transform([]byte(delta))
 	if err != nil {
 		t.Fatalf("delta chunk failed: %v", err)
 	}
@@ -409,7 +418,7 @@ func TestPassthroughHoldReleaseFlushKeepsOriginalOrder(t *testing.T) {
 
 	// 永久直通:后续 chunk 原样透传。
 	tail := "data: {\"type\":\"response.output_text.done\"}\n\n"
-	out2, err := h.transform([]byte(tail), terminal, errs)
+	out2, err := h.transform([]byte(tail))
 	if err != nil {
 		t.Fatalf("post-release chunk failed: %v", err)
 	}
@@ -421,17 +430,15 @@ func TestPassthroughHoldReleaseFlushKeepsOriginalOrder(t *testing.T) {
 // Release 时 chunk 携带半帧尾:flush 含持有字节与完整 chunk(半帧尾随行),
 // 下一 chunk 直通补全——流顺序仍由字节序保证。
 func TestPassthroughHoldReleaseWithPendingTail(t *testing.T) {
-	h := newPassthroughOutputHold()
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
+	h := newPassthroughOutputHold(responsesTestConfig())
 
-	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n"), terminal, errs); err != nil {
+	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n")); err != nil {
 		t.Fatalf("created chunk failed: %v", err)
 	}
 
 	// delta 完整帧 + 下一帧的开头(半帧尾)。
 	deltaPlus := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\ndata: {\"type\":\"response.output"
-	out, err := h.transform([]byte(deltaPlus), terminal, errs)
+	out, err := h.transform([]byte(deltaPlus))
 	if err != nil {
 		t.Fatalf("delta+partial chunk failed: %v", err)
 	}
@@ -443,7 +450,7 @@ func TestPassthroughHoldReleaseWithPendingTail(t *testing.T) {
 
 	// 半帧尾的后续:已直通,原样透传。
 	rest := "_done\"}\n\n"
-	out2, err := h.transform([]byte(rest), terminal, errs)
+	out2, err := h.transform([]byte(rest))
 	if err != nil {
 		t.Fatalf("tail completion failed: %v", err)
 	}
@@ -459,11 +466,9 @@ func TestPassthroughHoldCapDegradeEndToEnd(t *testing.T) {
 	maxEmptyOutputHoldBytes = 48
 	defer func() { maxEmptyOutputHoldBytes = prev }()
 
-	h := newPassthroughOutputHold()
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
+	h := newPassthroughOutputHold(responsesTestConfig())
 
-	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n"), terminal, errs); err != nil {
+	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n")); err != nil {
 		t.Fatalf("created chunk failed: %v", err)
 	}
 	if !h.holding_() {
@@ -472,7 +477,7 @@ func TestPassthroughHoldCapDegradeEndToEnd(t *testing.T) {
 
 	// 大块输出:hold 拒绝 → flush-degrade,完整写出。
 	big := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"" + strings.Repeat("r", 80) + "\"}\n\n"
-	out, err := h.transform([]byte(big), terminal, errs)
+	out, err := h.transform([]byte(big))
 	if err != nil {
 		t.Fatalf("big chunk failed: %v", err)
 	}
@@ -488,35 +493,46 @@ func TestPassthroughHoldCapDegradeEndToEnd(t *testing.T) {
 	}
 }
 
-// 未类型化 chunk 的保守放行(现状表征,批次二 Keep 翻转的对照基准):
-// 注释帧与 malformed JSON 都触发 Release + 永久直通。
+// 批次二②翻转后的未类型化帧处置:注释帧(无 data 行,SSE 规范的忽略语义)→
+// Keep(持有继续,不触发永久直通);malformed data 帧 → 保守放行(真含糊输入
+// 不演变成静默截断)。
 func TestPassthroughHoldUntypedChunkConservativeRelease(t *testing.T) {
-	h := newPassthroughOutputHold()
-	terminal := map[string]struct{}{"response.completed": {}}
-	errs := map[string]struct{}{"response.failed": {}}
+	h := newPassthroughOutputHold(responsesTestConfig())
 
-	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n"), terminal, errs); err != nil {
+	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n")); err != nil {
 		t.Fatalf("created chunk failed: %v", err)
 	}
 
-	// 注释帧(`: ping`)在无 event: 行、data JSON 不可解析时按现状保守放行。
+	// 注释帧(`: ping`)无事件语义:Keep,持有字节继续持有,零放行。
 	comment := ": ping - 1726300000\n\n"
-	out, err := h.transform([]byte(comment), terminal, errs)
+	out, err := h.transform([]byte(comment))
 	if err != nil {
 		t.Fatalf("comment chunk failed: %v", err)
 	}
-	// flush 契约:持有字节(created)+ 注释帧按原始顺序完整写出。
+	if len(out) != 0 {
+		t.Fatalf("comment frame must stay held, got %q", out)
+	}
+	if !h.holding_() {
+		t.Fatal("comment frame must not end holding")
+	}
+
+	// malformed data 帧仍保守放行:持有字节 + 本 chunk 完整 flush(绝不截断)。
+	badData := "data: not json\n\n"
+	out2, err := h.transform([]byte(badData))
+	if err != nil {
+		t.Fatalf("malformed data chunk failed: %v", err)
+	}
 	created := "data: {\"type\":\"response.created\"}\n\n"
-	if string(out) != created+comment {
-		t.Fatalf("conservative release must flush held bytes + comment verbatim, got %q", out)
+	if string(out2) != created+comment+badData {
+		t.Fatalf("conservative release must flush held bytes + comment + malformed data in order, got %q", out2)
 	}
 	if h.holding_() {
-		t.Fatal("conservative release must end holding (current semantics)")
+		t.Fatal("conservative release must end holding")
 	}
 
 	// 对照:纯 JSON 类型化路径不受影响。
-	h2 := newPassthroughOutputHold()
-	if got := h2.observe("response.created", []byte(`{}`), terminal, errs); got != passthroughHoldKeep {
+	h2 := newPassthroughOutputHold(responsesTestConfig())
+	if got := h2.observe("response.created", []byte(`{}`)); got != passthroughHoldKeep {
 		t.Fatalf("typed void-prefix must keep, got %d", got)
 	}
 }

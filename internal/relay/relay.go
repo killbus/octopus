@@ -1307,12 +1307,12 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 	var ptHold *passthroughOutputHold
 	var ptTransform stream.StreamTransform
 	if emptyPassthroughHoldEnabled() {
-		ptHold = newPassthroughOutputHold()
+		ptHold = newPassthroughOutputHold(cfg)
 		ptTransform = func(_ context.Context, data []byte) ([]byte, error) {
 			// RawSource 的 chunk 是 SSE 帧序列（"data: {...}\n\n"），不是单个 JSON；
 			// 帧解析与逐帧决策封装在 hold 内（跨 chunk 半帧尾由 pending 缓冲，
 			// flush-degrade 与保守放行契约见 passthroughOutputHold 注释）。
-			return ptHold.transform(data, cfg.TerminalEvents, cfg.ErrorEvents)
+			return ptHold.transform(data)
 		}
 	}
 
