@@ -182,3 +182,214 @@ func TestPassthroughErrorEventStreamIsLoggedButRecordedSuccess(t *testing.T) {
 		t.Fatalf("expected model field gpt-4o, got %q", fields["model"])
 	}
 }
+
+// 生产事故签名（2026-09-14 日志取证，log.txt）：上游桥（LiteLLM）把 429 洗成 200
+// SSE 空壳流——response.created → response.completed，零输出事件、零 usage——
+// 载荷先行透传、处理器返回 nil、success=true 记账。空输出重试机制（transform 路径
+// 专属）在这条 passthrough 路径上不生效。观测底线：该形态必须产出
+// relay.empty_stream 告警（kind=terminal_no_output），不再静默。
+// 行为保持不变：nil 返回值与 verbatim 透传都是表征的一部分。
+func TestPassthroughShellStreamTerminalNoOutputIsLoggedButRecordedSuccess(t *testing.T) {
+	ra, recorder := newEmptyStreamTestAttempt(t, inbound.InboundTypeOpenAIResponse, transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+
+	observedCore, observed := observer.New(zapcore.WarnLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	pt := ra.outAdapter.(transformerModel.PassthroughCapable)
+	cfg := pt.PassthroughConfig()
+	// 与事故响应同构（id/model 以测试值替换）：created + completed，无 output_item、
+	// 无 delta、usage 缺失。
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_shell","object":"response","model":"gpt-5.6-sol","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_shell","object":"response","model":"gpt-5.6-sol","created_at":0,"output":[],"status":"completed"}}`,
+		"",
+	}, "\n")
+
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), cfg); err != nil {
+		t.Fatalf("shell passthrough stream must keep returning nil (no behavior change), got %v", err)
+	}
+	if recorder.Body.Len() == 0 {
+		t.Fatalf("expected shell payload forwarded verbatim, got empty body")
+	}
+	if !ra.streamPayloadWritten.Load() {
+		t.Fatalf("expected payloadWritten=true after forwarding shell payload")
+	}
+
+	entries := observed.FilterMessage("relay.empty_stream").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one relay.empty_stream warn for shell stream, got %d", len(entries))
+	}
+	fields := map[string]string{}
+	for _, f := range entries[0].Context {
+		fields[f.Key] = f.String
+	}
+	if fields["empty_stream_kind"] != "terminal_no_output" {
+		t.Fatalf("expected empty_stream_kind=terminal_no_output, got %q (fields: %v)", fields["empty_stream_kind"], fields)
+	}
+	if fields["model"] != "gpt-4o" {
+		t.Fatalf("expected model field gpt-4o (requestModel from test helper), got %q", fields["model"])
+	}
+}
+
+// 对照组：携带输出事件的合法完成流（如 reasoning summary delta + completed）不得
+// 触发 terminal_no_output 告警——信封级证据存在即豁免，保证推理模型不被误伤。
+func TestPassthroughStreamWithOutputEvidenceNotLogged(t *testing.T) {
+	ra, _ := newEmptyStreamTestAttempt(t, inbound.InboundTypeOpenAIResponse, transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+
+	observedCore, observed := observer.New(zapcore.WarnLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	pt := ra.outAdapter.(transformerModel.PassthroughCapable)
+	cfg := pt.PassthroughConfig()
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_r","object":"response","model":"gpt-5.6-sol","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_r","object":"response","model":"gpt-5.6-sol","created_at":0,"output":[],"status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`,
+		"",
+	}, "\n")
+
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), cfg); err != nil {
+		t.Fatalf("evidence-carrying stream must succeed, got %v", err)
+	}
+	entries := observed.FilterMessage("relay.empty_stream").All()
+	if len(entries) != 0 {
+		t.Fatalf("expected no relay.empty_stream warn for evidence-carrying stream, got %d", len(entries))
+	}
+}
+
+// observeEmptyStreamUsage 的三种 usage 形态（影子判别谓词的输入侧）：
+// 在场为零（缺陷触发形态）/ 在场为正（豁免）/ 缺失（NULL≠0，未知）。
+func TestObserveEmptyStreamUsageForms(t *testing.T) {
+	created := `data: {"type":"response.created","response":{"id":"r","status":"in_progress"}}` + "\n\n"
+	cases := []struct {
+		name      string
+		rawStream string
+		want      emptyUsageVerdict
+	}{
+		{
+			name: "usage present and zero",
+			rawStream: created + `data: {"type":"response.completed","response":{"id":"r","status":"completed","usage":{"input_tokens":194495,"output_tokens":0,"total_tokens":194495}}}` + "\n\n",
+			want:  emptyUsageZero,
+		},
+		{
+			name: "usage present and positive",
+			rawStream: created + `data: {"type":"response.completed","response":{"id":"r","status":"completed","usage":{"input_tokens":10,"output_tokens":9964,"total_tokens":9974,"output_tokens_details":{"reasoning_tokens":9964}}}}` + "\n\n",
+			want:  emptyUsagePositive,
+		},
+		{
+			name:      "usage missing entirely",
+			rawStream: created + `data: {"type":"response.completed","response":{"id":"r","status":"completed"}}` + "\n\n",
+			want:      emptyUsageAbsent,
+		},
+		{
+			name:      "empty stream",
+			rawStream: "",
+			want:      emptyUsageAbsent,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := observeEmptyStreamUsage([]byte(tc.rawStream)); got != tc.want {
+				t.Fatalf("observeEmptyStreamUsage() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// 影子判别端到端：事故形态（空壳流、usage 缺失）必须记 relay.empty_stream_shadow
+// usage_form=usage_absent——这条日志就是影子期实测「桥透不透 usage」的数据来源。
+// 行为零变更：nil 返回值、verbatim 透传、记账照旧。
+func TestPassthroughShellStreamShadowLogged(t *testing.T) {
+	ra, recorder := newEmptyStreamTestAttempt(t, inbound.InboundTypeOpenAIResponse, transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+
+	observedCore, observed := observer.New(zapcore.InfoLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	pt := ra.outAdapter.(transformerModel.PassthroughCapable)
+	cfg := pt.PassthroughConfig()
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_shell","object":"response","model":"gpt-5.6-sol","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_shell","object":"response","model":"gpt-5.6-sol","created_at":0,"output":[],"status":"completed"}}`,
+		"",
+	}, "\n")
+
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), cfg); err != nil {
+		t.Fatalf("shell passthrough stream must keep returning nil (no behavior change), got %v", err)
+	}
+	if recorder.Body.Len() == 0 {
+		t.Fatalf("expected shell payload forwarded verbatim, got empty body")
+	}
+
+	entries := observed.FilterMessage("relay.empty_stream_shadow").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one relay.empty_stream_shadow info, got %d", len(entries))
+	}
+	fields := map[string]string{}
+	for _, f := range entries[0].Context {
+		fields[f.Key] = f.String
+	}
+	if fields["usage_form"] != "usage_absent" {
+		t.Fatalf("expected usage_form=usage_absent, got %q (fields: %v)", fields["usage_form"], fields)
+	}
+}
+
+// 影子判别对照组：usage 在场且 output_tokens==0（缺陷的在场形态）记 usage_zero；
+// usage 在场且 output_tokens>0（与零可见矛盾的豁免形态）不记。
+func TestPassthroughShellStreamShadowForms(t *testing.T) {
+	created := `data: {"type":"response.created","response":{"id":"resp_s","object":"response","model":"m","created_at":0,"output":[],"status":"in_progress"}}` + "\n\n"
+
+	t.Run("usage zero is shadow-logged", func(t *testing.T) {
+		ra, _ := newEmptyStreamTestAttempt(t, inbound.InboundTypeOpenAIResponse, transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+		observedCore, observed := observer.New(zapcore.InfoLevel)
+		prevLogger := log.Logger
+		log.Logger = zap.New(observedCore).Sugar()
+		defer func() { log.Logger = prevLogger }()
+
+		pt := ra.outAdapter.(transformerModel.PassthroughCapable)
+		cfg := pt.PassthroughConfig()
+		body := created + `data: {"type":"response.completed","response":{"id":"resp_s","object":"response","model":"m","created_at":0,"output":[],"status":"completed","usage":{"input_tokens":194495,"output_tokens":0,"total_tokens":194495}}}` + "\n\n"
+		if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), cfg); err != nil {
+			t.Fatalf("shell stream must keep returning nil, got %v", err)
+		}
+		entries := observed.FilterMessage("relay.empty_stream_shadow").All()
+		if len(entries) != 1 {
+			t.Fatalf("expected exactly one shadow log, got %d", len(entries))
+		}
+		fields := map[string]string{}
+		for _, f := range entries[0].Context {
+			fields[f.Key] = f.String
+		}
+		if fields["usage_form"] != "usage_zero" {
+			t.Fatalf("expected usage_form=usage_zero, got %q", fields["usage_form"])
+		}
+	})
+
+	t.Run("usage positive is exempt", func(t *testing.T) {
+		ra, _ := newEmptyStreamTestAttempt(t, inbound.InboundTypeOpenAIResponse, transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+		observedCore, observed := observer.New(zapcore.InfoLevel)
+		prevLogger := log.Logger
+		log.Logger = zap.New(observedCore).Sugar()
+		defer func() { log.Logger = prevLogger }()
+
+		pt := ra.outAdapter.(transformerModel.PassthroughCapable)
+		cfg := pt.PassthroughConfig()
+		body := created + `data: {"type":"response.completed","response":{"id":"resp_s","object":"response","model":"m","created_at":0,"output":[],"status":"completed","usage":{"input_tokens":10,"output_tokens":9964,"total_tokens":9974}}}` + "\n\n"
+		if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), cfg); err != nil {
+			t.Fatalf("exempt stream must keep returning nil, got %v", err)
+		}
+		entries := observed.FilterMessage("relay.empty_stream_shadow").All()
+		if len(entries) != 0 {
+			t.Fatalf("expected no shadow log for usage-positive exempt stream, got %d", len(entries))
+		}
+	})
+}

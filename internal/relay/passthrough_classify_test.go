@@ -163,6 +163,85 @@ func TestClassifyPassthroughStreamEnd(t *testing.T) {
 	}
 }
 
+// 输出证据维度：终态只证明流未中断，不证明生成发生过。输出事件 = 类型不在
+// terminal/error 集合里的非元事件（信封层协议形状检查，非内容启发式）。
+func TestClassifyPassthroughStreamEndOutputEvidence(t *testing.T) {
+	responsesTerminal := map[string]struct{}{
+		"response.completed":  {},
+		"response.failed":     {},
+		"response.incomplete": {},
+		"error":               {},
+	}
+	responsesError := map[string]struct{}{
+		"response.failed": {},
+		"error":           {},
+	}
+
+	created := `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"
+	inProgress := `data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"
+	completed := `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}` + "\n\n"
+
+	cases := []struct {
+		name           string
+		rawStream      string
+		terminalEvents map[string]struct{}
+		errorEvents    map[string]struct{}
+		wantKind       string
+		wantEvidence   bool
+	}{
+		{
+			// 生产事故签名（LiteLLM 桥把 429 洗成 200 空 completed 流）：
+			// 信封俱全、零输出事件。empty-output-retry-audit.md 第三轮焦点。
+			name:           "created then completed with zero output events",
+			rawStream:      created + completed,
+			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			wantKind: "terminal", wantEvidence: false,
+		},
+		{
+			name:           "in_progress only before terminal counts no evidence",
+			rawStream:      created + inProgress + completed,
+			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			wantKind: "terminal", wantEvidence: false,
+		},
+		{
+			name:           "reasoning summary delta is output evidence",
+			rawStream:      created + `data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}` + "\n\n" + completed,
+			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			wantKind: "terminal", wantEvidence: true,
+		},
+		{
+			name:           "output_item.added alone is output evidence",
+			rawStream:      created + `data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant"}}` + "\n\n" + completed,
+			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			wantKind: "terminal", wantEvidence: true,
+		},
+		{
+			name:           "text delta is output evidence",
+			rawStream:      created + `data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" + completed,
+			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			wantKind: "terminal", wantEvidence: true,
+		},
+		{
+			name:           "untyped events count as evidence",
+			rawStream:      created + `data: {"type":"response.queue_position","position":1}` + "\n\n" + completed,
+			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			wantKind: "terminal", wantEvidence: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, evidence := classifyPassthroughStreamEndWithEvidence([]byte(tc.rawStream), tc.terminalEvents, tc.errorEvents)
+			if kind != tc.wantKind {
+				t.Fatalf("kind = %q, want %q", kind, tc.wantKind)
+			}
+			if evidence != tc.wantEvidence {
+				t.Fatalf("evidence = %v, want %v", evidence, tc.wantEvidence)
+			}
+		})
+	}
+}
+
 // 事件超过 sse.Read MaxEventSize（bufio.ErrTooLong）时按解析失败处理。maxSSEEventSize
 // 是包级变量（环境变量可覆盖），此处临时调小以驱动该路径；relay 包测试均未启用
 // t.Parallel，串行执行下安全。

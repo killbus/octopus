@@ -1,19 +1,84 @@
 package relay
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 
 	"github.com/bestruirui/octopus/internal/relay/stream"
 	"github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/utils/log"
+	"github.com/tmaxmax/go-sse"
 )
 
 // errEmptyOutput 标记上游返回 200 但没有任何可见内容的空输出（issue #155 端口）。
 // 不依赖 CompletionTokens 判断——推理模型可能消耗大量推理 token 却不产出可见内容。
 // 返回该错误使 StatusCode=0 → isRetryableStatus(0)=true → 走既有同通道重试链。
 var errEmptyOutput = errors.New("upstream returned empty output (no visible content)")
+
+// emptyUsageVerdict 影子判别器对「终态 + 零可见 + usage」三者的裁决分类。
+//
+// 合取谓词（empty-output-retry-audit.md 第三轮 Kleppmann 裁定 + 研究先例
+// new-api ValidUsage）：terminal ∧ 零可见输出 ∧ usage 在场且 output==0 →
+// 记账自证的缺陷（合法 reasoning-only 的 output_tokens ≥ 推理 token > 0）。
+// usage 缺失是「未知」而非「零」（NULL≠0）：桥接通道可能剥离 usage，缺失形态
+// 只单独计数、不参与触发——影子期实测桥的透传行为后再定。
+type emptyUsageVerdict int
+
+const (
+	// emptyUsageAbsent 流的 completed 载荷不含 usage 字段（或终态载荷不可解析）。
+	emptyUsageAbsent emptyUsageVerdict = iota
+	// emptyUsageZero usage 在场且 output_tokens==0——缺陷的在场形态。
+	emptyUsageZero
+	// emptyUsagePositive usage 在场且 output_tokens>0——与零可见矛盾，判别器豁免
+	// （不触发，保持观测）。
+	emptyUsagePositive
+)
+
+// observeEmptyStreamUsage 从流尾终态载荷中提取 usage 形态。只读，不修改流。
+// 逐事件扫描：取第一个含 usage 字段的终态/任意载荷（Responses 的 usage 挂在
+// response.completed 的 response 对象上；chat completions 的最终 chunk 自带 usage）。
+func observeEmptyStreamUsage(rawStream []byte) emptyUsageVerdict {
+	if len(rawStream) == 0 {
+		return emptyUsageAbsent
+	}
+	readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
+	for ev, err := range sse.Read(bytes.NewReader(rawStream), readCfg) {
+		if err != nil {
+			return emptyUsageAbsent
+		}
+		var probe struct {
+			Response *struct {
+				Usage *struct {
+					OutputTokens *int64 `json:"output_tokens"`
+				} `json:"usage"`
+			} `json:"response"`
+			Usage *struct {
+				OutputTokens *int64 `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal([]byte(ev.Data), &probe) != nil {
+			continue
+		}
+		usage := probe.Usage
+		if usage == nil && probe.Response != nil {
+			usage = probe.Response.Usage
+		}
+		if usage == nil {
+			continue
+		}
+		if usage.OutputTokens == nil {
+			return emptyUsageAbsent
+		}
+		if *usage.OutputTokens == 0 {
+			return emptyUsageZero
+		}
+		return emptyUsagePositive
+	}
+	return emptyUsageAbsent
+}
 
 // maxEmptyOutputHoldBytes 限制空输出保持缓冲的大小（8 MiB）。
 // 持有量为解码单元对应的原始上游 chunk 字节数（编码字节的同量级代理，cap 的目的是

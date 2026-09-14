@@ -1293,19 +1293,38 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 			// 先行透传给客户端）；empty 结尾已按 ErrEmptyUpstreamStream 失败处理，但
 			// 三者都缺一条按缺陷族检索的告警日志，这里只补日志，不改变任何返回值与
 			// 记账行为。分类在 safe.Go 之外同步执行，必须保持无 panic。
-			if kind := classifyPassthroughStreamEnd(rawStream, cfg.TerminalEvents, cfg.ErrorEvents); isPassthroughEmptyStreamKind(kind) {
-				var channelID int
-				if ra.channel != nil {
-					channelID = ra.channel.ID
+			kind, hasOutputEvent := classifyPassthroughStreamEndWithEvidence(rawStream, cfg.TerminalEvents, cfg.ErrorEvents)
+			var channelID int
+			if ra.channel != nil {
+				channelID = ra.channel.ID
+			}
+			if isPassthroughEmptyStreamKind(kind) || (kind == passthroughStreamTerminal && !hasOutputEvent) {
+				logKind := kind
+				if kind == passthroughStreamTerminal {
+					// created/in_progress/终态俱全却零输出事件：上游桥洗白失败
+					// （如 429→200 空 completed 流）的信封签名，细分为独立缺陷族。
+					logKind = "terminal_no_output"
 				}
 				log.Warnw("relay.empty_stream",
-					"empty_stream_kind", kind,
+					"empty_stream_kind", logKind,
 					"api_key_id", ra.apiKeyID,
 					"group_id", ra.groupID,
 					"channel_id", channelID,
 					"channel", ra.channelNameForLog(),
 					"model", ra.requestModel,
 				)
+			}
+			// 影子判别器：终态 + 零输出事件（信封层零可见）时解析 usage 形态，
+			// 记录「本来会重试」但不改变任何行为（不重试、不改返回值、不改记账）。
+			// 毕业判据：zero 形态误报率≈0 后才允许该谓词管行为；absent 形态的
+			// 处置由影子期实测桥的 usage 透传行为决定。
+			if kind == passthroughStreamTerminal && !hasOutputEvent {
+				switch observeEmptyStreamUsage(rawStream) {
+				case emptyUsageZero:
+					ra.logShadowEmptyRetry("usage_zero", channelID)
+				case emptyUsageAbsent:
+					ra.logShadowEmptyRetry("usage_absent", channelID)
+				}
 			}
 			if len(rawStream) == 0 {
 				return stream.ErrEmptyUpstreamStream
@@ -1523,23 +1542,38 @@ func (ra *relayAttempt) collectResponse() {
 // TerminalEvents 中，按终态处理会把上游失败当成正常完成。解析失败不猜测、
 // 不 panic（OnFinish 在 safe.Go 之外执行）。重写自原 streamReachedTerminalEvent。
 func classifyPassthroughStreamEnd(rawStream []byte, terminalEvents, errorEvents map[string]struct{}) string {
+	kind, _ := classifyPassthroughStreamEndWithEvidence(rawStream, terminalEvents, errorEvents)
+	return kind
+}
+
+// classifyPassthroughStreamEndWithEvidence 在分类之外报告该流是否携带输出事件
+// （类型 ∉ terminalEvents ∪ errorEvents 的非空事件——对 Responses 即
+// response.output_item.added、任何 *.delta、response.output_text.done 等；对
+// Anthropic 即 content_block_start、任何 delta 事件）。
+//
+// 这是事件信封层的协议形状检查，不是内容启发式：终态只证明流未中断，不证明生成
+// 发生过——上游桥把 429 洗成 created→completed 空壳流时，中间不存在任何输出事件。
+// created/in_progress 属无输出语义的元事件，不计为证据。解析失败时不报告证据
+// （false），与 kind=truncated/unclassified 的「不猜测」一致。
+func classifyPassthroughStreamEndWithEvidence(rawStream []byte, terminalEvents, errorEvents map[string]struct{}) (string, bool) {
 	if len(rawStream) == 0 {
-		return passthroughStreamEmpty
+		return passthroughStreamEmpty, false
 	}
 	readCfg := &sse.ReadConfig{MaxEventSize: maxSSEEventSize}
 	eventCount := 0
 	sawTerminal := false
+	sawOutputEvent := false
 	for ev, err := range sse.Read(bytes.NewReader(rawStream), readCfg) {
 		if err != nil {
 			// 中段解析失败：已看到终态视为完整流；有事件但未到终态视为截断；
 			// 一个事件都没解析出来则无法判断。
 			if sawTerminal {
-				return passthroughStreamTerminal
+				return passthroughStreamTerminal, sawOutputEvent
 			}
 			if eventCount > 0 {
-				return passthroughStreamTruncated
+				return passthroughStreamTruncated, false
 			}
-			return passthroughStreamUnclassified
+			return passthroughStreamUnclassified, false
 		}
 
 		typ := strings.TrimSpace(ev.Type)
@@ -1553,26 +1587,28 @@ func classifyPassthroughStreamEnd(rawStream []byte, terminalEvents, errorEvents 
 		}
 
 		if _, ok := errorEvents[typ]; ok {
-			return passthroughStreamErrorEvent
+			return passthroughStreamErrorEvent, sawOutputEvent
 		}
 		// 未类型化的顶层 error 字段是 OpenAI 系的事实错误形状（协议错误形状检查，
 		// 非内容启发式）；显式 null 视为无错误。
 		if len(probe.Error) > 0 && string(probe.Error) != "null" {
-			return passthroughStreamErrorEvent
+			return passthroughStreamErrorEvent, sawOutputEvent
 		}
 		if _, ok := terminalEvents[typ]; ok {
 			// 不立即返回：后续事件中的错误事件应胜出终态。
 			sawTerminal = true
+		} else if typ != "" && typ != "response.created" && typ != "response.in_progress" {
+			sawOutputEvent = true
 		}
 		eventCount++
 	}
 	if eventCount == 0 {
-		return passthroughStreamEmpty
+		return passthroughStreamEmpty, false
 	}
 	if sawTerminal {
-		return passthroughStreamTerminal
+		return passthroughStreamTerminal, sawOutputEvent
 	}
-	return passthroughStreamUnclassified
+	return passthroughStreamUnclassified, false
 }
 
 // classifyPassthroughStreamEnd 的返回值。relay.empty_stream 日志以该值为
@@ -1586,7 +1622,8 @@ const (
 )
 
 // isPassthroughEmptyStreamKind 报告该分类是否需要以 Warnw 级别记录。
-// terminal 属正常完成、unclassified 无法定论，均不打扰告警。
+// terminal 在调用侧按输出证据细分（terminal 且零输出事件 → terminal_no_output）；
+// unclassified 无法定论，不打扰告警。
 func isPassthroughEmptyStreamKind(kind string) bool {
 	switch kind {
 	case passthroughStreamEmpty, passthroughStreamErrorEvent, passthroughStreamTruncated:
@@ -1594,4 +1631,18 @@ func isPassthroughEmptyStreamKind(kind string) bool {
 	default:
 		return false
 	}
+}
+
+// logShadowEmptyRetry 记录影子判别命中（Infow 级，区别于告警——未改行为，非事故）。
+// relay.empty_stream_shadow 形态字段：usage_zero（usage 在场且 output==0，判别式
+// 触发形态）/ usage_absent（usage 缺失，NULL≠0，不触发，待实测桥的透传行为）。
+func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int) {
+	log.Infow("relay.empty_stream_shadow",
+		"usage_form", usageForm,
+		"api_key_id", ra.apiKeyID,
+		"group_id", ra.groupID,
+		"channel_id", channelID,
+		"channel", ra.channelNameForLog(),
+		"model", ra.requestModel,
+	)
 }
