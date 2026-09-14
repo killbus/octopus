@@ -486,6 +486,20 @@ func (ra *relayAttempt) attempt() attemptResult {
 	op.ChannelKeyUpdate(ra.usedKey)
 	span.End(dbmodel.AttemptFailed, statusCode, fwdErr.Error())
 
+	// 影子观测（G2）：chat-completions 流式出站由 ChatOutbound.TransformRequest
+	// 无条件注入 stream_options.include_usage=true（将 usage 合同升级为必填，空输出
+	// 判别器依赖该字段）。上游以 400 拒绝注入时在此归因——纯日志，零行为变更，
+	// 400 的重试/透传语义不变。
+	if statusCode == http.StatusBadRequest && ra.streamUsageOptionsInjected() {
+		log.Warnw("relay.include_usage_rejected",
+			"api_key_id", ra.apiKeyID,
+			"group_id", ra.groupID,
+			"channel_id", ra.channel.ID,
+			"channel", ra.channelNameForLog(),
+			"model", ra.requestModel,
+		)
+	}
+
 	// Channel 维度统计
 	op.StatsChannelUpdate(ra.channel.ID, dbmodel.StatsMetrics{
 		WaitTime:      span.Duration().Milliseconds(),
@@ -1645,4 +1659,18 @@ func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int) {
 		"channel", ra.channelNameForLog(),
 		"model", ra.requestModel,
 	)
+}
+
+// streamUsageOptionsInjected 报告本次 attempt 的上游请求是否被注入了
+// stream_options.include_usage=true。注入发生在 ChatOutbound.TransformRequest 内部
+// （chat-completions 流式出站，WS 与 HTTP 共用 attempt 链路），relay 层以协议形状
+// 等价判断：chat 出站 + 内部请求为流式。仅服务影子观测（400 归因）。
+func (ra *relayAttempt) streamUsageOptionsInjected() bool {
+	if ra == nil || ra.outAdapter == nil || ra.internalRequest == nil {
+		return false
+	}
+	if _, ok := ra.outAdapter.(*openaiOutbound.ChatOutbound); !ok {
+		return false
+	}
+	return ra.internalRequest.Stream != nil && *ra.internalRequest.Stream
 }

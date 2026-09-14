@@ -95,6 +95,16 @@ func (o *ChatOutbound) TransformRequest(ctx context.Context, request *model.Inte
 	// on it (and downstreams that replay it) see the caller's intent.
 	// Ref: https://platform.openai.com/docs/api-reference/chat
 
+	// stream_options.include_usage is force-enabled on every streaming
+	// chat-completions request. Usage on the final chunk is what makes the
+	// empty-output discriminator decidable at the relay layer (terminal +
+	// no visible output + usage.output_tokens == 0 → suspect empty stream;
+	// usage absent → contract breach, attribution only). Do NOT strip it
+	// afterward: callers that didn't ask for usage still receive one extra
+	// final chunk with empty choices — this matches OpenAI's own documented
+	// behavior for include_usage, and the inbound transform forwards the
+	// aux chunk to clients (Cherry Studio compat path). Removing the
+	// injection per-request would break the empty-stream evidence chain.
 	if request.Stream != nil && *request.Stream {
 		if request.StreamOptions == nil {
 			request.StreamOptions = &model.StreamOptions{IncludeUsage: true}
