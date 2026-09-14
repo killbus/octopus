@@ -47,6 +47,14 @@ absent  form: usage missing                                                     
 
 ## Graduation window (first to arrive wins)
 
+> Round-5 write-back record (batch-1 #6, 2026-09-14): the amendments, cost
+> column, ruling template, and in-window reconciliation points below are
+> round-5 audit residue (P2), persisted **before the window start point**
+> (Deming: criteria are operational definitions of measurement and must exist
+> before data; exception — the extractor-asymmetry record may be written in
+> parallel). Window start point = after the lights-off drill passes, declared
+> explicitly by ops.
+
 | # | Window | Meaning |
 |---|--------|---------|
 | 1 | 60 manually adjudicated true triggers (zero form) | data-volume window |
@@ -114,6 +122,32 @@ defer by default).
 
 ## Exit rules (pre-committed)
 
+> Round-5 amendments (three one-line rulings, written back before the window
+> start point; Deming: criteria are operational definitions of measurement
+> and must exist before data):
+
+1. **Fallback graduation path gets a minimum n**: when window 1 (60 samples)
+   is unreachable, the fallback applies ("natural triggers under the 30k
+   exposure window fall short of 60, zero FPs on samples already collected"),
+   and the fallback path itself requires a minimum n = 30 — below 30 samples,
+   the ruling is "insufficient samples" regardless of the FP count, handled
+   per the window-3 disposition (recorded as part of the decision, no default
+   deferral).
+2. **5% rollback line metric made explicit**: rollback rule 1's "FP rate
+   >= 5%" is measured as the **observation frequency** (FPs / total
+   adjudications in the ops ledger), not a statistical confidence upper
+   bound — 5% observed means revert, no interval correction. The "95%
+   confidence upper bound 5%" phrasing elsewhere in this file belongs to the
+   graduation criterion; the two are different metrics and must not be mixed.
+3. **Shadow/gate extractor asymmetry on record**: the shadow discriminator
+   and the R2 gate currently extract usage through different paths (shadow:
+   `observeEmptyStreamUsage`'s sse.Read scan; gate:
+   `observeStreamEvents`/`observeStreamChunk` decoded observation).
+   Converging them into a single pure function with a contract parameter is
+   an open G4 P2 (Feathers: the seam most likely to rot). Until converged,
+   the two extractors may disagree on the same payload — every graduation
+   number must cite which extractor produced it.
+
 Graduation of the zero form (discriminator takes over behavior) requires
 **all** of:
 
@@ -137,6 +171,50 @@ Rollback rules (any single trigger reverts):
 If the absent form does not enter "flip": the predicate stays zero-only, and
 the contract-relativity clause is deleted from the code comment (no ghost
 promises).
+
+## Cost dimension (round-5 addition)
+
+The exit criteria previously lacked a cost dimension: retries have real cost
+(same-channel resend latency and billing, double input tokens under false
+positives), and a graduation argument with only benefit-side evidence
+("retry produced visible content") is incomplete.
+
+- The ruling table gains a cost column: **expected total cost per request** =
+  one normal-request cost + P(trigger) x expected retry cost. Measure first
+  (the shadow ledger records trigger frequency and actual billing of retry
+  samples), calibrate thresholds later — the first ruling table records
+  measured values only; thresholds are pre-committed at the first in-window
+  reconciliation point.
+- Cost measurement sources: RelayLog (Attempts / InputTokens / Cost) plus
+  the latency fields of probe/replay log lines.
+
+## Ruling template and reconciliation points (round-5 addition)
+
+Ruling template (pre-committed numbers, no in-the-moment discretion):
+
+```
+Ruling #N (date: YYYY-MM-DD, week W of the window)
+- Cumulative trigger samples: __ (zero form, extractor source annotated)
+- Manual adjudication: clean __ / FP __ (observed FP frequency __%)
+- Absent characterization (if probe data): visible-content rate __% (n=__)
+- Crossover watch cell: channel x model spike __ (none/yes, detail)
+- Rollback-line check: observed frequency >= 5%? (yes -> execute rollback rules immediately)
+- Cost measurement: P(trigger)=__, expected retry cost=__/request
+- Conclusion: keep observing / enter graduation ruling / rollback triggered
+```
+
+**Reconciliation happens at every in-window ruling point** (the template IS
+the reconciliation action), not once at the six-week end — criteria drift or
+predicate blind spots surface inside the window instead of being ratified
+after the fact.
+
+**Citation restriction for absent-form rulings**: absent-form graduation
+rulings must **not cite shadow rows from G6-ON channels** — the G6 hold
+starves the passthrough path's usage-form data (behavior before precondition
+1's fix), so those shadow rows are always empty or biased for the absent
+form, and citing them pollutes the confusion matrix. Until G6 status is
+written into the graduation dashboard as a track-splitting condition,
+absent rulings may only cite shadow rows from G6-OFF (or G6-less) channels.
 
 ## Relationship to existing constraints
 
