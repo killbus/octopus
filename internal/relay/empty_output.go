@@ -21,7 +21,8 @@ var errEmptyOutput = errors.New("upstream returned empty output (no visible cont
 // emptyUsageVerdict 影子判别器对「终态 + 零可见 + usage」三者的裁决分类。
 //
 // 影子期出口规则（Deming：预承诺写死，三个月后无人应凭记忆决策——
-// full spec: octopus-engineering .trellis/tasks/09-14-empty-output-retry-graduation/
+// full spec: docs/ops-protocol-empty-output-retry.md，入仓权威副本；来源
+// octopus-engineering .trellis/tasks/09-14-empty-output-retry-graduation/
 // research/ops-protocol.md）：
 //   - 毕业窗口（数据收集前锁定，取先到者）：① 60 例人工裁决的真触发；
 //     ② 单通道曝光 ≥30k 请求；③ 六周硬上限。

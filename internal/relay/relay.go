@@ -492,6 +492,7 @@ func (ra *relayAttempt) attempt() attemptResult {
 	// 400 的重试/透传语义不变。
 	if statusCode == http.StatusBadRequest && ra.streamUsageOptionsInjected() {
 		log.Warnw("relay.include_usage_rejected",
+			"start_time_unix", ra.metrics.StartTime.Unix(),
 			"api_key_id", ra.apiKeyID,
 			"group_id", ra.groupID,
 			"channel_id", ra.channel.ID,
@@ -1400,6 +1401,7 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 			channelID = ra.channel.ID
 		}
 		log.Warnw("relay.empty_stream_hold_failure",
+			"start_time_unix", ra.metrics.StartTime.Unix(),
 			"api_key_id", ra.apiKeyID,
 			"group_id", ra.groupID,
 			"channel_id", channelID,
@@ -1708,6 +1710,7 @@ func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int, end
 	fields := []interface{}{
 		"usage_form", usageForm,
 		"stream_end_reason", string(endReason),
+		"start_time_unix", ra.metrics.StartTime.Unix(),
 		"api_key_id", ra.apiKeyID,
 		"group_id", ra.groupID,
 		"channel_id", channelID,
@@ -1761,6 +1764,7 @@ func (ra *relayAttempt) emitEmptyStreamFamily(rawStream []byte, endReason stream
 		log.Warnw("relay.empty_stream",
 			"empty_stream_kind", logKind,
 			"stream_end_reason", string(endReason),
+			"start_time_unix", ra.metrics.StartTime.Unix(),
 			"api_key_id", ra.apiKeyID,
 			"group_id", ra.groupID,
 			"channel_id", channelID,

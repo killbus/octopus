@@ -132,7 +132,7 @@ func (s *Setting) Validate() error {
 			return fmt.Errorf("setting value must be non-negative")
 		}
 		return nil
-	case SettingKeyRelayLogKeepEnabled, SettingKeyResponsesWSEnabled, SettingKeyGroupHealthEnabled, SettingKeyStatsSiteModelBackfilled, SettingKeyVersionSegmentBackfilled, SettingKeyOutlierRetireEnabled, SettingKeyWebDAVIncludeStats:
+	case SettingKeyRelayLogKeepEnabled, SettingKeyResponsesWSEnabled, SettingKeyGroupHealthEnabled, SettingKeyStatsSiteModelBackfilled, SettingKeyVersionSegmentBackfilled, SettingKeyOutlierRetireEnabled, SettingKeyWebDAVIncludeStats, SettingKeyEmptyPassthroughHoldEnabled:
 		if s.Value != "true" && s.Value != "false" {
 			return fmt.Errorf("setting value must be true or false")
 		}
