@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	dbmodel "github.com/bestruirui/octopus/internal/model"
+	"github.com/bestruirui/octopus/internal/op"
 	"github.com/bestruirui/octopus/internal/relay/stream"
 	transformerModel "github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/transformer/outbound"
@@ -696,5 +698,63 @@ func TestSplitSSEFramesByteFraming(t *testing.T) {
 				t.Fatalf("round-trip mismatch: got %q, want %q", rebuilt, tc.input)
 			}
 		})
+	}
+}
+
+// round-5 走查遗留（Feathers 裁定,阻塞毕业）：变量替换测试绕开了真接缝——
+// 闭包 → op.SettingGetBool → settingCache。本测试不替换 emptyPassthroughHoldEnabled,
+// 经真实设置链驱动灯下演练步骤①③⑤的代码级代理:默认 OFF 直通 → 置 true
+// 同进程拦截（不重启）→ 翻回 false 直通。
+func TestPassthroughHoldSwitchEndToEndThroughSettingCache(t *testing.T) {
+	setupRelayTestDB(t)
+
+	shell := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_e2e","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_e2e","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"completed"}}`,
+		"",
+		"",
+	}, "\n")
+
+	// 默认（设置缺失,默认表 fallback false）:生产闭包读到 OFF,壳流直通。
+	if emptyPassthroughHoldEnabled() {
+		t.Fatal("default setting must read OFF through production closure")
+	}
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(shell), ra.ptCfg()); err != nil {
+		t.Fatalf("default OFF must forward shell stream, got %v", err)
+	}
+	if recorder.Body.Len() == 0 {
+		t.Fatal("default OFF must forward shell payload")
+	}
+
+	// 置 true（op.SettingSetString 真写入路径）:同进程即时生效,新流被拦截。
+	if err := op.SettingSetString(dbmodel.SettingKeyEmptyPassthroughHoldEnabled, "true"); err != nil {
+		t.Fatalf("SettingSetString true: %v", err)
+	}
+	if !emptyPassthroughHoldEnabled() {
+		t.Fatal("setting true must be visible through production closure without restart")
+	}
+	ra, recorder = newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(shell), ra.ptCfg()); !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("setting true must intercept shell stream, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("setting true must hold shell stream (zero bytes), got %q", recorder.Body.String())
+	}
+
+	// 翻回 false:直通恢复。
+	if err := op.SettingSetString(dbmodel.SettingKeyEmptyPassthroughHoldEnabled, "false"); err != nil {
+		t.Fatalf("SettingSetString false: %v", err)
+	}
+	if emptyPassthroughHoldEnabled() {
+		t.Fatal("setting false must be visible through production closure")
+	}
+	ra, recorder = newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	if err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(shell), ra.ptCfg()); err != nil {
+		t.Fatalf("flip-back OFF must forward shell stream, got %v", err)
+	}
+	if recorder.Body.Len() == 0 {
+		t.Fatal("flip-back OFF must forward shell payload")
 	}
 }
