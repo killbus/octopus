@@ -1586,21 +1586,22 @@ func (ra *relayAttempt) collectResponse() {
 // error_event 优先于 terminal：部分错误事件（如 response.failed）同时位于
 // TerminalEvents 中，按终态处理会把上游失败当成正常完成。解析失败不猜测、
 // 不 panic（OnFinish 在 safe.Go 之外执行）。重写自原 streamReachedTerminalEvent。
-func classifyPassthroughStreamEnd(rawStream []byte, terminalEvents, errorEvents map[string]struct{}) string {
-	kind, _ := classifyPassthroughStreamEndWithEvidence(rawStream, terminalEvents, errorEvents)
+func classifyPassthroughStreamEnd(rawStream []byte, terminalEvents, errorEvents, voidPrefixEvents map[string]struct{}) string {
+	kind, _ := classifyPassthroughStreamEndWithEvidence(rawStream, terminalEvents, errorEvents, voidPrefixEvents)
 	return kind
 }
 
 // classifyPassthroughStreamEndWithEvidence 在分类之外报告该流是否携带输出事件
-// （类型 ∉ terminalEvents ∪ errorEvents 的非空事件——对 Responses 即
-// response.output_item.added、任何 *.delta、response.output_text.done 等；对
-// Anthropic 即 content_block_start、任何 delta 事件）。
+// （类型 ∉ terminalEvents ∪ errorEvents ∪ voidPrefixEvents 的非空事件——对
+// Responses 即 response.output_item.added、任何 *.delta、response.output_text.done
+// 等；对 Anthropic 即 content_block_start、任何 delta 事件）。
 //
 // 这是事件信封层的协议形状检查，不是内容启发式：终态只证明流未中断，不证明生成
 // 发生过——上游桥把 429 洗成 created→completed 空壳流时，中间不存在任何输出事件。
-// created/in_progress 属无输出语义的元事件，不计为证据。解析失败时不报告证据
-// （false），与 kind=truncated/unclassified 的「不猜测」一致。
-func classifyPassthroughStreamEndWithEvidence(rawStream []byte, terminalEvents, errorEvents map[string]struct{}) (string, bool) {
+// void-prefix 元事件（协议在 VoidPrefixEvents 声明的无输出语义事件——批次二③
+// 收敛点，替代此前硬编码的 created/in_progress）不计为证据。解析失败时不报告
+// 证据（false），与 kind=truncated/unclassified 的「不猜测」一致。
+func classifyPassthroughStreamEndWithEvidence(rawStream []byte, terminalEvents, errorEvents, voidPrefixEvents map[string]struct{}) (string, bool) {
 	if len(rawStream) == 0 {
 		return passthroughStreamEmpty, false
 	}
@@ -1642,8 +1643,10 @@ func classifyPassthroughStreamEndWithEvidence(rawStream []byte, terminalEvents, 
 		if _, ok := terminalEvents[typ]; ok {
 			// 不立即返回：后续事件中的错误事件应胜出终态。
 			sawTerminal = true
-		} else if typ != "" && typ != "response.created" && typ != "response.in_progress" {
-			sawOutputEvent = true
+		} else if typ != "" {
+			if _, ok := voidPrefixEvents[typ]; !ok {
+				sawOutputEvent = true
+			}
 		}
 		eventCount++
 	}
@@ -1748,8 +1751,8 @@ func (ra *relayAttempt) streamUsageOptionsInjected() bool {
 // （OnFinish 到达点由 processor 的 finalize 保证；post-Run 到达点由
 // ErrEmptyUpstreamStream 语义保证）。
 func (ra *relayAttempt) emitEmptyStreamFamily(rawStream []byte, endReason stream.StreamEndReason) {
-	terminalEvents, errorEvents := ra.passthroughEventSets()
-	kind, hasOutputEvent := classifyPassthroughStreamEndWithEvidence(rawStream, terminalEvents, errorEvents)
+	terminalEvents, errorEvents, voidPrefixEvents := ra.passthroughEventSets()
+	kind, hasOutputEvent := classifyPassthroughStreamEndWithEvidence(rawStream, terminalEvents, errorEvents, voidPrefixEvents)
 	var channelID int
 	if ra.channel != nil {
 		channelID = ra.channel.ID
@@ -1786,17 +1789,19 @@ func (ra *relayAttempt) emitEmptyStreamFamily(rawStream []byte, endReason stream
 	}
 }
 
-// passthroughEventSets 提取 passthrough 判定所需的事件分类集合（终态/错误），
-// 供共享终态器的分类器使用。集合来自出站适配器的 PassthroughConfig。
-func (ra *relayAttempt) passthroughEventSets() (terminalEvents, errorEvents map[string]struct{}) {
+// passthroughEventSets 提取 passthrough 判定所需的事件分类集合（终态/错误/
+// void-prefix），供共享终态器的分类器使用。集合来自出站适配器的 PassthroughConfig。
+// 归一化保证非 nil（分类器可安全查表，不必每次判空）。
+func (ra *relayAttempt) passthroughEventSets() (terminalEvents, errorEvents, voidPrefixEvents map[string]struct{}) {
 	terminalEvents = map[string]struct{}{}
 	errorEvents = map[string]struct{}{}
+	voidPrefixEvents = map[string]struct{}{}
 	if ra.outAdapter == nil {
-		return terminalEvents, errorEvents
+		return terminalEvents, errorEvents, voidPrefixEvents
 	}
 	pt, ok := ra.outAdapter.(model.PassthroughCapable)
 	if !ok {
-		return terminalEvents, errorEvents
+		return terminalEvents, errorEvents, voidPrefixEvents
 	}
 	cfg := pt.PassthroughConfig()
 	if cfg.TerminalEvents != nil {
@@ -1805,5 +1810,8 @@ func (ra *relayAttempt) passthroughEventSets() (terminalEvents, errorEvents map[
 	if cfg.ErrorEvents != nil {
 		errorEvents = cfg.ErrorEvents
 	}
-	return terminalEvents, errorEvents
+	if cfg.VoidPrefixEvents != nil {
+		voidPrefixEvents = cfg.VoidPrefixEvents
+	}
+	return terminalEvents, errorEvents, voidPrefixEvents
 }

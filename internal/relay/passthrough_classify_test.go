@@ -32,130 +32,139 @@ func TestClassifyPassthroughStreamEnd(t *testing.T) {
 	anthropicError := map[string]struct{}{
 		"error": {},
 	}
+	responsesVoidPrefix := map[string]struct{}{
+		"response.created":     {},
+		"response.in_progress": {},
+	}
+	anthropicVoidPrefix := map[string]struct{}{
+		"message_start": {},
+		"ping":          {},
+	}
 
 	created := `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"
 	completed := `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}` + "\n\n"
 
 	cases := []struct {
-		name           string
-		rawStream      string
-		terminalEvents map[string]struct{}
-		errorEvents    map[string]struct{}
-		want           string
+		name             string
+		rawStream        string
+		terminalEvents   map[string]struct{}
+		errorEvents      map[string]struct{}
+		voidPrefixEvents map[string]struct{}
+		want             string
 	}{
 		{
 			name:           "empty raw stream",
 			rawStream:      "",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "empty",
 		},
 		{
 			name:           "comment-only stream has zero events",
 			rawStream:      ":\n\n:\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "empty",
 		},
 		{
 			name:           "openai response.failed event type",
 			rawStream:      created + `data: {"type":"response.failed","response":{"error":{"code":429,"message":"rate limited"}}}` + "\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "error_event",
 		},
 		{
 			name:           "anthropic SSE event field error",
 			rawStream:      "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
-			terminalEvents: anthropicTerminal, errorEvents: anthropicError,
+			terminalEvents: anthropicTerminal, errorEvents: anthropicError, voidPrefixEvents: anthropicVoidPrefix,
 			want: "error_event",
 		},
 		{
 			name:           "untyped top-level error payload",
 			rawStream:      `data: {"error":{"message":"Azure 429","type":"rate_limit"}}` + "\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "error_event",
 		},
 		{
 			name:           "explicit null error payload is not an error",
 			rawStream:      created + `data: {"type":"response.output_text.delta","error":null,"delta":"hi"}` + "\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "unclassified",
 		},
 		{
 			name:           "terminal completed event",
 			rawStream:      created + completed,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "terminal",
 		},
 		{
 			name:           "anthropic message_stop terminal",
 			rawStream:      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-			terminalEvents: anthropicTerminal, errorEvents: anthropicError,
+			terminalEvents: anthropicTerminal, errorEvents: anthropicError, voidPrefixEvents: anthropicVoidPrefix,
 			want: "terminal",
 		},
 		{
 			name:           "error event after terminal wins",
 			rawStream:      completed + `data: {"error":{"message":"late failure"}}` + "\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "error_event",
 		},
 		{
 			name:           "truncated stream cut mid-event",
 			rawStream:      created + `data: {"type":"response.output_te`,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "truncated",
 		},
 		{
 			name:           "parse failure after terminal still terminal",
 			rawStream:      created + completed + `data: {"garba`,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "terminal",
 		},
 		{
 			name:           "parse failure with zero events is unclassified",
 			rawStream:      `data: {"garbage-without-newline`,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "unclassified",
 		},
 		{
 			name:           "non-matching events with clean EOF",
 			rawStream:      created + `data: {"type":"response.queue_position","position":1}` + "\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "unclassified",
 		},
 		{
 			name:           "multi-line data field joins into one JSON payload",
 			rawStream:      "data: {\"type\":\ndata: \"response.completed\",\"response\":{}}\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "terminal",
 		},
 		{
 			name:           "JSON without type field is not an error",
 			rawStream:      `data: {"foo":"bar","error_hint":"no such key"}` + "\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "unclassified",
 		},
 		{
 			name:           "non-JSON payload containing error substring is not an error",
 			rawStream:      `data: plain text with the word error inside` + "\n\n",
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			want: "unclassified",
 		},
 		{
 			name:           "nil sets never panic",
 			rawStream:      created + completed,
-			terminalEvents: nil, errorEvents: nil,
+			terminalEvents: nil, errorEvents: nil, voidPrefixEvents: nil,
 			want: "unclassified",
 		},
 		{
 			name:           "nil sets still detect error via payload shape",
 			rawStream:      created + `data: {"error":{"message":"x"}}` + "\n\n",
-			terminalEvents: nil, errorEvents: nil,
+			terminalEvents: nil, errorEvents: nil, voidPrefixEvents: nil,
 			want: "error_event",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyPassthroughStreamEnd([]byte(tc.rawStream), tc.terminalEvents, tc.errorEvents)
+			got := classifyPassthroughStreamEnd([]byte(tc.rawStream), tc.terminalEvents, tc.errorEvents, tc.voidPrefixEvents)
 			if got != tc.want {
 				t.Fatalf("classifyPassthroughStreamEnd() = %q, want %q", got, tc.want)
 			}
@@ -181,57 +190,63 @@ func TestClassifyPassthroughStreamEndOutputEvidence(t *testing.T) {
 	inProgress := `data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"
 	completed := `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}` + "\n\n"
 
+	responsesVoidPrefix := map[string]struct{}{
+		"response.created":     {},
+		"response.in_progress": {},
+	}
+
 	cases := []struct {
-		name           string
-		rawStream      string
-		terminalEvents map[string]struct{}
-		errorEvents    map[string]struct{}
-		wantKind       string
-		wantEvidence   bool
+		name             string
+		rawStream        string
+		terminalEvents   map[string]struct{}
+		errorEvents      map[string]struct{}
+		voidPrefixEvents map[string]struct{}
+		wantKind         string
+		wantEvidence     bool
 	}{
 		{
 			// 生产事故签名（LiteLLM 桥把 429 洗成 200 空 completed 流）：
 			// 信封俱全、零输出事件。empty-output-retry-audit.md 第三轮焦点。
 			name:           "created then completed with zero output events",
 			rawStream:      created + completed,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			wantKind: "terminal", wantEvidence: false,
 		},
 		{
 			name:           "in_progress only before terminal counts no evidence",
 			rawStream:      created + inProgress + completed,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			wantKind: "terminal", wantEvidence: false,
 		},
 		{
 			name:           "reasoning summary delta is output evidence",
 			rawStream:      created + `data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}` + "\n\n" + completed,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			wantKind: "terminal", wantEvidence: true,
 		},
 		{
 			name:           "output_item.added alone is output evidence",
 			rawStream:      created + `data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant"}}` + "\n\n" + completed,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			wantKind: "terminal", wantEvidence: true,
 		},
 		{
 			name:           "text delta is output evidence",
 			rawStream:      created + `data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" + completed,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			wantKind: "terminal", wantEvidence: true,
 		},
 		{
 			name:           "untyped events count as evidence",
 			rawStream:      created + `data: {"type":"response.queue_position","position":1}` + "\n\n" + completed,
-			terminalEvents: responsesTerminal, errorEvents: responsesError,
+			terminalEvents: responsesTerminal, errorEvents: responsesError, voidPrefixEvents: responsesVoidPrefix,
 			wantKind: "terminal", wantEvidence: true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			kind, evidence := classifyPassthroughStreamEndWithEvidence([]byte(tc.rawStream), tc.terminalEvents, tc.errorEvents)
+			kind, evidence := classifyPassthroughStreamEndWithEvidence([]byte(tc.rawStream), tc.terminalEvents, tc.errorEvents, tc.voidPrefixEvents)
 			if kind != tc.wantKind {
 				t.Fatalf("kind = %q, want %q", kind, tc.wantKind)
 			}
@@ -255,15 +270,15 @@ func TestClassifyPassthroughStreamEndOversizedEvent(t *testing.T) {
 	defer func() { maxSSEEventSize = prev }()
 
 	// 已解析出事件后遭遇超长事件：未达终态 → truncated。
-	if got := classifyPassthroughStreamEnd([]byte(created+oversized), terminal, nil); got != passthroughStreamTruncated {
+	if got := classifyPassthroughStreamEnd([]byte(created+oversized), terminal, nil, nil); got != passthroughStreamTruncated {
 		t.Fatalf("oversized event after events = %q, want %q", got, passthroughStreamTruncated)
 	}
 	// 超长事件前已有终态事件：视为完整流 → terminal。
-	if got := classifyPassthroughStreamEnd([]byte(created+`data: {"type":"response.completed"}`+"\n\n"+oversized), terminal, nil); got != passthroughStreamTerminal {
+	if got := classifyPassthroughStreamEnd([]byte(created+`data: {"type":"response.completed"}`+"\n\n"+oversized), terminal, nil, nil); got != passthroughStreamTerminal {
 		t.Fatalf("oversized event after terminal = %q, want %q", got, passthroughStreamTerminal)
 	}
 	// 零事件 + 首个事件即超长：无法判断 → unclassified。
-	if got := classifyPassthroughStreamEnd([]byte(oversized), terminal, nil); got != passthroughStreamUnclassified {
+	if got := classifyPassthroughStreamEnd([]byte(oversized), terminal, nil, nil); got != passthroughStreamUnclassified {
 		t.Fatalf("oversized first event = %q, want %q", got, passthroughStreamUnclassified)
 	}
 }
@@ -287,7 +302,7 @@ func TestPassthroughErrorEventStreamClassifiedErrorEvent(t *testing.T) {
 	if recorder.Body.Len() == 0 {
 		t.Fatalf("expected error-event payload forwarded to client verbatim, got empty body")
 	}
-	kind := classifyPassthroughStreamEnd([]byte(body), cfg.TerminalEvents, cfg.ErrorEvents)
+	kind := classifyPassthroughStreamEnd([]byte(body), cfg.TerminalEvents, cfg.ErrorEvents, cfg.VoidPrefixEvents)
 	if kind != passthroughStreamErrorEvent {
 		t.Fatalf("expected classifier kind %q for error-event stream, got %q", passthroughStreamErrorEvent, kind)
 	}
