@@ -1325,44 +1325,10 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 			ra.stopFirstTokenTimer()
 		},
 		OnFinish: func(ctx context.Context, rawStream []byte) error {
-			// 流尾观测分类：error_event/truncated 结尾今天都会按成功记账（载荷字节已
-			// 先行透传给客户端）；empty 结尾已按 ErrEmptyUpstreamStream 失败处理，但
-			// 三者都缺一条按缺陷族检索的告警日志，这里只补日志，不改变任何返回值与
-			// 记账行为。分类在 safe.Go 之外同步执行，必须保持无 panic。
-			kind, hasOutputEvent := classifyPassthroughStreamEndWithEvidence(rawStream, cfg.TerminalEvents, cfg.ErrorEvents)
-			var channelID int
-			if ra.channel != nil {
-				channelID = ra.channel.ID
-			}
-			if isPassthroughEmptyStreamKind(kind) || (kind == passthroughStreamTerminal && !hasOutputEvent) {
-				logKind := kind
-				if kind == passthroughStreamTerminal {
-					// created/in_progress/终态俱全却零输出事件：上游桥洗白失败
-					// （如 429→200 空 completed 流）的信封签名，细分为独立缺陷族。
-					logKind = "terminal_no_output"
-				}
-				log.Warnw("relay.empty_stream",
-					"empty_stream_kind", logKind,
-					"stream_end_reason", string(processor.EndReason()),
-					"api_key_id", ra.apiKeyID,
-					"group_id", ra.groupID,
-					"channel_id", channelID,
-					"channel", ra.channelNameForLog(),
-					"model", ra.requestModel,
-				)
-			}
-			// 影子判别器：终态 + 零输出事件（信封层零可见）时解析 usage 形态，
-			// 记录「本来会重试」但不改变任何行为（不重试、不改返回值、不改记账）。
-			// 毕业判据：zero 形态误报率≈0 后才允许该谓词管行为；absent 形态的
-			// 处置由影子期实测桥的 usage 透传行为决定。
-			if kind == passthroughStreamTerminal && !hasOutputEvent {
-				switch observeEmptyStreamUsage(rawStream) {
-				case emptyUsageZero:
-					ra.logShadowEmptyRetry("usage_zero", channelID, processor.EndReason())
-				case emptyUsageAbsent:
-					ra.logShadowEmptyRetry("usage_absent", channelID, processor.EndReason())
-				}
-			}
+			// 流尾观测分类与 usage 形态影子判别收敛到共享终态器（Nottingham：
+			// 同一生命周期两个到达点，判定逻辑一处所有）；这里只补日志，不改变
+			// 任何返回值与记账行为。分类在 safe.Go 之外同步执行，必须保持无 panic。
+			ra.emitEmptyStreamFamily(rawStream, processor.EndReason())
 			if len(rawStream) == 0 {
 				return stream.ErrEmptyUpstreamStream
 			}
@@ -1407,11 +1373,20 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 	}
 
 	// G6 终判：ErrEmptyUpstreamStream（finalize 零写入路径，OnFinish 未被调用）
-	// 且全程保持中（零输出事件零放行）→ 缺陷证据成立。客户端零字节（held 未写），
-	// statusCode=0 走既有同通道重试链（fresh clean stream，无 dual created）。
-	// 契约内缺失=breach（Responses completed 原生强制 usage），与 G4 transform
-	// 路径的差分为 written decision（见 passthroughOutputHold 注释）。
+	// 且全程保持中（零输出事件零放行）且 Suspect 终态帧在场 → 缺陷证据成立。
+	// 客户端零字节（held 未写），statusCode=0 走既有同通道重试链（fresh clean
+	// stream，无 dual created）。契约内缺失=breach（Responses completed 原生强制
+	// usage），与 G4 transform 路径的差分为 written decision（见
+	// passthroughOutputHold 注释）。
+	//
+	// round-5 开灯前置①：此路径 OnFinish 被饿死，relay.empty_stream 告警与
+	// usage 形态影子行在修复前采不到。sawSuspect 闩锁把 void-prefix 后中途截断的
+	// 流（EOF、无终态帧）挡在桶外（client_gone 免费标签规则：截断 ≠ 完成的空）；
+	// 补打走共享终态器，heldRaw() 快照即完整流字节（pending 无后续可合并）。
 	if err != nil && errors.Is(err, stream.ErrEmptyUpstreamStream) && ptHold != nil && ptHold.holding_() {
+		if ptHold.suspect_() {
+			ra.emitEmptyStreamFamily(ptHold.heldRaw(), stream.StreamEndReasonEmpty)
+		}
 		var channelID int
 		if ra.channel != nil {
 			channelID = ra.channel.ID
@@ -1750,4 +1725,73 @@ func (ra *relayAttempt) streamUsageOptionsInjected() bool {
 		return false
 	}
 	return ra.internalRequest.Stream != nil && *ra.internalRequest.Stream
+}
+
+// emitEmptyStreamFamily 是空流缺陷族观测的共享终态器（Nottingham round-5 裁定：
+// OnFinish 与 post-Run G6 终判是同一生命周期的两个到达点，判定逻辑必须收敛为
+// 一处，而非三处打补丁）。输入 rawStream（流原始字节）与 endReason，补打：
+//   - relay.empty_stream（Warnw，缺陷族告警，kind 细分 terminal_no_output）；
+//   - relay.empty_stream_shadow（Infow，usage 形态影子判别，log-only）。
+//
+// 不修改任何返回值、记账与流字节——纯观测。调用方必须已确认零 payload 写入
+// （OnFinish 到达点由 processor 的 finalize 保证；post-Run 到达点由
+// ErrEmptyUpstreamStream 语义保证）。
+func (ra *relayAttempt) emitEmptyStreamFamily(rawStream []byte, endReason stream.StreamEndReason) {
+	terminalEvents, errorEvents := ra.passthroughEventSets()
+	kind, hasOutputEvent := classifyPassthroughStreamEndWithEvidence(rawStream, terminalEvents, errorEvents)
+	var channelID int
+	if ra.channel != nil {
+		channelID = ra.channel.ID
+	}
+	if isPassthroughEmptyStreamKind(kind) || (kind == passthroughStreamTerminal && !hasOutputEvent) {
+		logKind := kind
+		if kind == passthroughStreamTerminal {
+			// created/in_progress/终态俱全却零输出事件：上游桥洗白失败
+			// （如 429→200 空 completed 流）的信封签名，细分为独立缺陷族。
+			logKind = "terminal_no_output"
+		}
+		log.Warnw("relay.empty_stream",
+			"empty_stream_kind", logKind,
+			"stream_end_reason", string(endReason),
+			"api_key_id", ra.apiKeyID,
+			"group_id", ra.groupID,
+			"channel_id", channelID,
+			"channel", ra.channelNameForLog(),
+			"model", ra.requestModel,
+		)
+	}
+	// 影子判别器：终态 + 零输出事件（信封层零可见）时解析 usage 形态，
+	// 记录「本来会重试」但不改变任何行为（不重试、不改返回值、不改记账）。
+	// 毕业判据：zero 形态误报率≈0 后才允许该谓词管行为；absent 形态的
+	// 处置由影子期实测桥的 usage 透传行为决定。
+	if kind == passthroughStreamTerminal && !hasOutputEvent {
+		switch observeEmptyStreamUsage(rawStream) {
+		case emptyUsageZero:
+			ra.logShadowEmptyRetry("usage_zero", channelID, endReason)
+		case emptyUsageAbsent:
+			ra.logShadowEmptyRetry("usage_absent", channelID, endReason)
+		}
+	}
+}
+
+// passthroughEventSets 提取 passthrough 判定所需的事件分类集合（终态/错误），
+// 供共享终态器的分类器使用。集合来自出站适配器的 PassthroughConfig。
+func (ra *relayAttempt) passthroughEventSets() (terminalEvents, errorEvents map[string]struct{}) {
+	terminalEvents = map[string]struct{}{}
+	errorEvents = map[string]struct{}{}
+	if ra.outAdapter == nil {
+		return terminalEvents, errorEvents
+	}
+	pt, ok := ra.outAdapter.(model.PassthroughCapable)
+	if !ok {
+		return terminalEvents, errorEvents
+	}
+	cfg := pt.PassthroughConfig()
+	if cfg.TerminalEvents != nil {
+		terminalEvents = cfg.TerminalEvents
+	}
+	if cfg.ErrorEvents != nil {
+		errorEvents = cfg.ErrorEvents
+	}
+	return terminalEvents, errorEvents
 }

@@ -43,6 +43,11 @@ type passthroughOutputHold struct {
 	heldBytes int          // 持有的原始 chunk 字节（buf+pending 总量，cap 依据）
 	holding   bool         // 是否仍在拦截（未 flush 放行）
 	capped    bool         // 超限闩锁：永久降级直通
+	// sawSuspect 闩锁（round-5 开灯前置①）：observe 在 Suspect 分支置位。post-Run
+	// G6 终判以 holding_() && sawSuspect 为闸——仅 Suspect 终态帧在场才判
+	// hold_failure 并补打影子行；void-prefix 后中途截断的流（EOF、无终态帧）不入
+	// usage 形态桶（client_gone 免费标签规则：截断 ≠ 完成的空）。
+	sawSuspect bool
 }
 
 func newPassthroughOutputHold() *passthroughOutputHold {
@@ -191,6 +196,7 @@ func (h *passthroughOutputHold) observe(typ string, data []byte, terminalEvents,
 		if usage != nil && *usage > 0 {
 			return passthroughHoldRelease
 		}
+		h.sawSuspect = true
 		return passthroughHoldSuspect
 	}
 	// 其余非空类型：输出证据（output_item.added / *.delta / done 等）→ 放行并
@@ -253,12 +259,6 @@ func (h *passthroughOutputHold) flushAllBytes(payload []byte) []byte {
 	return append(out, payload...)
 }
 
-// flushAll 返回纯持有字节（流尾降级路径：无新 chunk 可拼）。
-func (h *passthroughOutputHold) flushAll() []byte {
-	defer h.release()
-	return append([]byte(nil), h.buf.Bytes()...)
-}
-
 // release 释放保持（合法流 / 降级）。
 func (h *passthroughOutputHold) release() {
 	h.holding = false
@@ -268,4 +268,18 @@ func (h *passthroughOutputHold) release() {
 // holding_ 报告是否仍保持（OnFinish 终判依据：全程零输出事件且零放行）。
 func (h *passthroughOutputHold) holding_() bool {
 	return h.holding
+}
+
+// suspect_ 报告 Suspect 终态帧是否在场（round-5 前置①：post-Run 补打影子行的
+// 闸门条件之一——截断流不入桶）。
+func (h *passthroughOutputHold) suspect_() bool {
+	return h.sawSuspect
+}
+
+// heldRaw 返回全部持有字节（buf + pending 半帧尾；只读快照，不改变保持状态）。
+// post-Run 终判时流已结束、pending 不再有后续 chunk 可合并，快照即完整流字节。
+func (h *passthroughOutputHold) heldRaw() []byte {
+	out := make([]byte, 0, h.buf.Len()+len(h.pending))
+	out = append(out, h.buf.Bytes()...)
+	return append(out, h.pending...)
 }

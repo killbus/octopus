@@ -9,6 +9,10 @@ import (
 	"github.com/bestruirui/octopus/internal/relay/stream"
 	transformerModel "github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/transformer/outbound"
+	"github.com/bestruirui/octopus/internal/utils/log"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // G6 passthrough hold-until-output-evidence 的端到端行为测试（实验开关，默认 OFF）。
@@ -178,5 +182,127 @@ func TestPassthroughHoldObserveMatrix(t *testing.T) {
 	h := newPassthroughOutputHold()
 	if got := h.observe("", []byte(`not json`), terminal, errs); got != passthroughHoldRelease {
 		t.Fatalf("untyped chunk must release conservatively, got %d", got)
+	}
+}
+
+// round-5 开灯前置①的验收测试：被 hold 的壳流在 OnFinish 饿死路径上仍必须产出
+// 缺陷族告警与 usage 形态影子行（取证链闭合）；对照组是 void-prefix 后中途截断
+// 的流（EOF、无终态帧）——不入 usage 桶（client_gone 免费标签规则：截断 ≠ 完成的空）。
+func TestPassthroughHoldShellStreamShadowEmittedPostRun(t *testing.T) {
+	enablePassthroughHoldForTest(t)
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+
+	observedCore, observed := observer.New(zapcore.InfoLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	// 事故签名流：created → completed 空壳（零输出事件、零 usage、契约内 breach）。
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_shell","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_shell","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"completed"}}`,
+		"",
+		"",
+	}, "\n")
+
+	err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), ra.ptCfg())
+	if !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("expected ErrEmptyUpstreamStream for shell stream under hold, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("expected zero bytes to client (held), got %q", recorder.Body.String())
+	}
+
+	// OnFinish 早退路径上的取证回填：缺陷族告警 + 影子行都必须在场。
+	warns := observed.FilterMessage("relay.empty_stream").All()
+	if len(warns) != 1 {
+		t.Fatalf("expected exactly one relay.empty_stream warn post-run, got %d", len(warns))
+	}
+	fields := map[string]string{}
+	for _, f := range warns[0].Context {
+		fields[f.Key] = f.String
+	}
+	if fields["empty_stream_kind"] != "terminal_no_output" {
+		t.Fatalf("expected empty_stream_kind=terminal_no_output, got %q (fields: %v)", fields["empty_stream_kind"], fields)
+	}
+	if fields["stream_end_reason"] != "empty" {
+		t.Fatalf("expected stream_end_reason=empty, got %q (fields: %v)", fields["stream_end_reason"], fields)
+	}
+	shadows := observed.FilterMessage("relay.empty_stream_shadow").All()
+	if len(shadows) != 1 {
+		t.Fatalf("expected exactly one relay.empty_stream_shadow info post-run, got %d", len(shadows))
+	}
+	sfields := map[string]string{}
+	for _, f := range shadows[0].Context {
+		sfields[f.Key] = f.String
+	}
+	if sfields["usage_form"] != "usage_absent" {
+		t.Fatalf("expected usage_form=usage_absent, got %q (fields: %v)", sfields["usage_form"], sfields)
+	}
+}
+
+// 对照组：仅 void-prefix（created）后上游 EOF——hold 保持但无 Suspect 终态帧，
+// 不得产出 relay.empty_stream / relay.empty_stream_shadow（截断 ≠ 完成的空）。
+func TestPassthroughHoldTruncatedStreamStaysOutOfUsageBucket(t *testing.T) {
+	enablePassthroughHoldForTest(t)
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+
+	observedCore, observed := observer.New(zapcore.InfoLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	// created 后立即 EOF（无终态帧）。
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_trunc","object":"response","model":"gpt-4o","created_at":0,"output":[],"status":"in_progress"}}`,
+		"",
+		"",
+	}, "\n")
+
+	err := ra.handleStreamResponsePassthroughV2(context.Background(), sseTestResponse(body), ra.ptCfg())
+	if !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("expected ErrEmptyUpstreamStream for truncated stream, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("expected zero bytes to client (held), got %q", recorder.Body.String())
+	}
+
+	if warns := observed.FilterMessage("relay.empty_stream").All(); len(warns) != 0 {
+		t.Fatalf("truncated stream must not emit relay.empty_stream, got %d", len(warns))
+	}
+	if shadows := observed.FilterMessage("relay.empty_stream_shadow").All(); len(shadows) != 0 {
+		t.Fatalf("truncated stream must not emit relay.empty_stream_shadow, got %d", len(shadows))
+	}
+}
+
+// 闩锁单元：observe 的 Suspect 分支置位 sawSuspect；Keep 分支不置位。
+// 字节经 transform 流转（observe 单元直调不经过 hold(frames)，buf 恒空）。
+func TestPassthroughHoldSuspectLatch(t *testing.T) {
+	terminal := map[string]struct{}{"response.completed": {}}
+	errs := map[string]struct{}{"response.failed": {}}
+
+	h := newPassthroughOutputHold()
+	if _, err := h.transform([]byte("data: {\"type\":\"response.created\"}\n\n"), terminal, errs); err != nil {
+		t.Fatalf("transform keep chunk failed: %v", err)
+	}
+	if h.suspect_() {
+		t.Fatal("keep branch must not set sawSuspect latch")
+	}
+	if got := h.observe("response.created", []byte(`{}`), terminal, errs); got != passthroughHoldKeep {
+		t.Fatalf("void-prefix must keep, got %d", got)
+	}
+	if _, err := h.transform([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"), terminal, errs); err != nil {
+		t.Fatalf("transform suspect chunk failed: %v", err)
+	}
+	if !h.suspect_() {
+		t.Fatal("suspect branch must set sawSuspect latch")
+	}
+	if !h.holding_() {
+		t.Fatal("suspect must keep holding")
+	}
+	// heldRaw 快照：buf 与 pending 之和（只读，不改变保持状态）。
+	if len(h.heldRaw()) == 0 {
+		t.Fatal("heldRaw must return held bytes snapshot")
 	}
 }
