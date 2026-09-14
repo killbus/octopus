@@ -20,6 +20,17 @@ var errEmptyOutput = errors.New("upstream returned empty output (no visible cont
 
 // emptyUsageVerdict 影子判别器对「终态 + 零可见 + usage」三者的裁决分类。
 //
+// 影子期出口规则（Deming：预承诺写死，三个月后无人应凭记忆决策——
+// full spec: octopus-engineering .trellis/tasks/09-14-empty-output-retry-graduation/
+// research/ops-protocol.md）：
+//   - 毕业窗口（数据收集前锁定，取先到者）：① 60 例人工裁决的真触发；
+//     ② 单通道曝光 ≥30k 请求；③ 六周硬上限。
+//   - 毕业判据：zero 形态人工裁决误报率 <1%（60 clean → 95% 置信上界 5%）
+//     且 absent 形态经 probe/replay 定性（桥剥离 usage 还是上游真不回）→
+//     判别器方可接管行为；否则维持 log-only。
+//   - 误报率 ≥5% 或出现 channel×model 系统性误报（新模型上桥）→ 撤下
+//     shadow 判别（保留空流告警），回炉谓词。
+//
 // 合取谓词（empty-output-retry-audit.md 第三轮 Kleppmann 裁定 + 研究先例
 // new-api ValidUsage）：terminal ∧ 零可见输出 ∧ usage 在场且 output==0 →
 // 记账自证的缺陷（合法 reasoning-only 的 output_tokens ≥ 推理 token > 0）。

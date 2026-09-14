@@ -1660,11 +1660,36 @@ func isPassthroughEmptyStreamKind(kind string) bool {
 	}
 }
 
+// shadowProbeSamplePct 影子探针采样率（百分比，0-100）。1-5% 的真重试样本购买
+// absent 形态的混淆矩阵（Kleppmann 裁定：触发形态从不出现时，纯影子拿不到真值）。
+// 本轮仅做采样标记（probe=true 进影子日志行），探针执行体（真重试 + 备份渠道
+// replay）由 PR-3 ops panel 承载。0 = 关闭采样。
+var shadowProbeSamplePct = 0
+
+// shadowProbeSampled 确定性采样判定（FNV-1a over 稳定请求标识）。同一请求重放
+// 日志时采样结论不漂移；边界内输入全拒（pct<=0）或全收（pct>=100）。
+func shadowProbeSampled(pct int, seed string) bool {
+	if pct <= 0 {
+		return false
+	}
+	if pct >= 100 {
+		return true
+	}
+	h := uint32(2166136261)
+	for i := 0; i < len(seed); i++ {
+		h ^= uint32(seed[i])
+		h *= 16777619
+	}
+	return int(h%100) < pct
+}
+
 // logShadowEmptyRetry 记录影子判别命中（Infow 级，区别于告警——未改行为，非事故）。
 // relay.empty_stream_shadow 形态字段：usage_zero（usage 在场且 output==0，判别式
 // 触发形态）/ usage_absent（usage 缺失，NULL≠0，不触发，待实测桥的透传行为）。
+// probe=true 标记本事件命中探针采样（执行体在 PR-3：真重试一次，log-only，
+// 「重试产出可见内容」= 真阳性）。
 func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int, endReason stream.StreamEndReason) {
-	log.Infow("relay.empty_stream_shadow",
+	fields := []interface{}{
 		"usage_form", usageForm,
 		"stream_end_reason", string(endReason),
 		"api_key_id", ra.apiKeyID,
@@ -1672,7 +1697,12 @@ func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int, end
 		"channel_id", channelID,
 		"channel", ra.channelNameForLog(),
 		"model", ra.requestModel,
-	)
+	}
+	if shadowProbeSamplePct > 0 {
+		seed := fmt.Sprintf("%d|%d|%d|%s", ra.apiKeyID, channelID, ra.metrics.StartTime.UnixNano(), ra.requestModel)
+		fields = append(fields, "probe", shadowProbeSampled(shadowProbeSamplePct, seed))
+	}
+	log.Infow("relay.empty_stream_shadow", fields...)
 }
 
 // streamUsageOptionsInjected 报告本次 attempt 的上游请求是否被注入了
