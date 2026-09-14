@@ -883,6 +883,10 @@ func (ra *relayAttempt) handleWSStreamResponseV2(ctx context.Context, reader *ws
 			hold.heldBytes(), processor.PayloadWritten())
 	}
 
+	// round-5 前置①（路径错位闭合）：WS transform 路径的流尾 usage 形态影子行
+	// （observe-only，与 HTTP transform 路径同函数）。
+	ra.emitTransformEmptyStreamUsageShadow(hold, processor.EndReason())
+
 	// Handle first token timeout specifically
 	if err != nil && strings.Contains(err.Error(), "first token timeout") {
 		return ra.firstTokenTimeoutError()
@@ -1254,6 +1258,10 @@ func (ra *relayAttempt) handleStreamResponseV2(ctx context.Context, response *ht
 		log.Debugf("empty-output hold discarded %d buffered bytes on stream end (written=%t)",
 			hold.heldBytes(), processor.PayloadWritten())
 	}
+
+	// round-5 前置①（路径错位闭合）：transform 路径的流尾 usage 形态影子行
+	// （observe-only，非扰动——见 emitTransformEmptyStreamUsageShadow 注释）。
+	ra.emitTransformEmptyStreamUsageShadow(hold, processor.EndReason())
 
 	// Handle first token timeout specifically
 	if err != nil && strings.Contains(err.Error(), "first token timeout") {

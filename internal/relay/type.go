@@ -166,6 +166,14 @@ func (ra *relayAttempt) channelNameForLog() string {
 	return ra.channel.Name
 }
 
+// channelIDForLog 返回通道 ID（nil 安全）——影子日志行与 RelayLog 关联键（G5 桶维度）。
+func (ra *relayAttempt) channelIDForLog() int {
+	if ra == nil || ra.channel == nil {
+		return 0
+	}
+	return ra.channel.ID
+}
+
 func (ra *relayAttempt) baseURLKeyForLog() string {
 	if ra == nil {
 		return ""

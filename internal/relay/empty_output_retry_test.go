@@ -14,7 +14,11 @@ import (
 	"github.com/bestruirui/octopus/internal/transformer/inbound"
 	transformerModel "github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/bestruirui/octopus/internal/transformer/outbound"
+	"github.com/bestruirui/octopus/internal/utils/log"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // inboundOpenAIResponse 便于在本文件内构造 Responses 入站类型。
@@ -237,10 +241,110 @@ func normalizeItemIDs(s string) string {
 	return s
 }
 
+// round-5 前置①（路径错位闭合）的验收测试：transform 路径被保持的壳流在流尾
+// 必须产出 usage 形态影子行（observe-only，非扰动）；截断流与 unknown 放行路径
+// 不落桶。
+func TestTransformEmptyStreamUsageShadowEmittedPostRun(t *testing.T) {
+	// 壳流：created → reasoning delta → completed（usage 在场且 output==0）。
+	// G4 闸门判 failure,全量保持到流尾 → ErrEmptyUpstreamStream + usage_zero 影子行。
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	ra.emptyRetryEnabled = true
+
+	observedCore, observed := observer.New(zapcore.InfoLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"completed","usage":{"input_tokens":194000,"output_tokens":0,"total_tokens":194000}}}`,
+		"",
+	}, "\n")
+	if err := ra.handleStreamResponseV2(context.Background(), sseTestResponse(body)); !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("expected shell stream to retry, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("expected nothing forwarded (all held), got %q", recorder.Body.String())
+	}
+
+	// 影子回填：usage_form=usage_zero、end_reason=empty。
+	shadows := observed.FilterMessage("relay.empty_stream_shadow").All()
+	if len(shadows) != 1 {
+		t.Fatalf("expected exactly one relay.empty_stream_shadow post-run, got %d", len(shadows))
+	}
+	fields := map[string]string{}
+	for _, f := range shadows[0].Context {
+		fields[f.Key] = f.String
+	}
+	if fields["usage_form"] != "usage_zero" {
+		t.Fatalf("expected usage_form=usage_zero, got %q (fields: %v)", fields["usage_form"], fields)
+	}
+	if fields["stream_end_reason"] != "empty" {
+		t.Fatalf("expected stream_end_reason=empty, got %q (fields: %v)", fields["stream_end_reason"], fields)
+	}
+	if fields["model"] != "gpt-4o" {
+		t.Fatalf("expected model field gpt-4o, got %q (fields: %v)", fields["model"], fields)
+	}
+}
+
+// 对照组①:仅 created 后 EOF(截断流)——hold 保持但无 Suspect 终态块,不入桶。
+func TestTransformEmptyStreamUsageShadowTruncatedStaysOut(t *testing.T) {
+	ra, _ := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	ra.emptyRetryEnabled = true
+
+	observedCore, observed := observer.New(zapcore.InfoLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_t","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}`,
+		"",
+	}, "\n")
+	if err := ra.handleStreamResponseV2(context.Background(), sseTestResponse(body)); !errors.Is(err, stream.ErrEmptyUpstreamStream) {
+		t.Fatalf("expected truncated stream to retry, got %v", err)
+	}
+	if shadows := observed.FilterMessage("relay.empty_stream_shadow").All(); len(shadows) != 0 {
+		t.Fatalf("truncated stream must not emit shadow line, got %d", len(shadows))
+	}
+}
+
+// 对照组②:usage 缺失的终态(G4 unknown 保守放行)——flush 已发生,hold 不保持,
+// 流尾不落影子行(与 TestEmptyRetryFinishReasonFlushesHeldBytes 同语义,双确认)。
+func TestTransformEmptyStreamUsageShadowUnknownForwardsNoShadow(t *testing.T) {
+	ra, recorder := newEmptyStreamTestAttempt(t, inboundOpenAIResponse(), transformerModel.APIFormatOpenAIResponse, outbound.OutboundTypeOpenAIResponse)
+	ra.emptyRetryEnabled = true
+
+	observedCore, observed := observer.New(zapcore.InfoLevel)
+	prevLogger := log.Logger
+	log.Logger = zap.New(observedCore).Sugar()
+	defer func() { log.Logger = prevLogger }()
+
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_u","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"in_progress"}}`,
+		"",
+		`data: {"type":"response.reasoning_summary_text.delta","delta":"only reasoning"}`,
+		"",
+		`data: {"type":"response.completed","response":{"id":"resp_u","object":"response","model":"gpt-4o","created_at":1,"output":[],"status":"completed"}}`,
+		"",
+	}, "\n")
+	if err := ra.handleStreamResponseV2(context.Background(), sseTestResponse(body)); err != nil {
+		t.Fatalf("expected unknown-usage terminal to forward (conservative), got %v", err)
+	}
+	if !strings.Contains(recorder.Body.String(), "only reasoning") {
+		t.Fatalf("expected reasoning forwarded, got %q", recorder.Body.String())
+	}
+	if shadows := observed.FilterMessage("relay.empty_stream_shadow").All(); len(shadows) != 0 {
+		t.Fatalf("unknown-usage forwarded stream must not emit shadow line, got %d", len(shadows))
+	}
+}
+
 // 硬约束①（headless-stream 防护）的回归测试：inAdapter 是 request 级、跨 attempt 共享，
-// 保持 chunk 若提前送入入站编码，abandon 后 hasResponseCreated / sequenceNumber /
-// reasoning item 状态会泄漏进重试 attempt——response.created 被抑制（headless 流）、
-// 序号跳变、上一 attempt 的 reasoning 复活。保持设计必须对被放弃的 chunk 零入站接触。
 func TestEmptyRetryNoInAdapterLeakAcrossAttempts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

@@ -277,6 +277,10 @@ type emptyOutputHold struct {
 	heldRaw    int        // 持有单元对应的原始 chunk 字节数（cap 依据）
 	hasVisible bool       // 释放闩锁：可见内容到达或 finish_reason flush 后置位
 	capped     bool       // 超限闩锁：永久降级为直通
+	// sawSuspect 闩锁（round-5 前置①，transform 路径）：wrapTransform 在
+	// G4 判 failure 保持时置位。post-Run 以 holding() && suspect() 为闸补打
+	// usage 形态影子行——截断流（EOF、无终态块）不入桶。
+	sawSuspect bool
 }
 
 func newEmptyOutputHold(enabled bool) *emptyOutputHold {
@@ -351,6 +355,28 @@ func (h *emptyOutputHold) holding() bool {
 	return h.active()
 }
 
+// suspect 报告持有单元中是否存在 Suspect 终态（round-5 前置①的同构闸门：
+// transform 路径流尾补打影子行时，截断流（EOF、无终态块）不入 usage 桶）。
+// wrapTransform 在 G4 判 failure 保持时置位，与 passthroughOutputHold.sawSuspect
+// 同语义。
+func (h *emptyOutputHold) suspect() bool {
+	if h == nil {
+		return false
+	}
+	return h.sawSuspect
+}
+
+// heldUnitsSnapshot 返回持有单元的只读快照（Run 返回后的流尾观测用）。
+// 放弃路径上流已结束、pending 不再有后续单元，快照即完整流内容。
+func (h *emptyOutputHold) heldUnitsSnapshot() []heldUnit {
+	if h == nil {
+		return nil
+	}
+	out := make([]heldUnit, len(h.pending))
+	copy(out, h.pending)
+	return out
+}
+
 // holdOnHeldChunk 返回 StreamConfig.OnHeldChunk 回调：仅当空输出重试启用时接线
 // （保持 chunk 到达 → 模式拆分重排首字计时）。OFF 时返回 nil，processor 的 held
 // 分支整体短路——legacy 跳过 chunk 保持既有定时器语义（OFF 等价，硬约束⑤ Off 分支）。
@@ -402,6 +428,7 @@ func (h *emptyOutputHold) wrapTransform(ra *relayAttempt) stream.StreamTransform
 				// （#40200 合法空轮 / 桥剥离）→ 现状 flush（保守放行）。
 				if obs.terminal && !obs.visible &&
 					evaluateEmptyStreamFailure(false, obs.usage) == emptyFailureFailure {
+					h.sawSuspect = true // 闩锁（round-5 前置①）：Suspect 终态在场
 					if h.hold(unit, len(data)) {
 						return nil, nil // 缺陷证据成立：终态块一并保持，流尾空判定
 					}
@@ -435,4 +462,49 @@ func (h *emptyOutputHold) wrapTransform(ra *relayAttempt) stream.StreamTransform
 		}
 		return ra.encodeInboundStreamResponse(ctx, internalStream)
 	}
+}
+
+// emitTransformEmptyStreamUsageShadow 是 transform/WS 路径的流尾 usage 形态影子
+// 回填（round-5 开灯前置①的路径错位闭合，Kleppmann 裁定选项一：wire observe-only
+// classification on transform/WS paths）。ErrEmptyUpstreamStream 且 hold 保持中时，
+// 从持有单元重放 G4 观测链得出 usage 形态，产出与 passthrough 路径同构的影子行。
+//
+// 非扰动契约（硬约束：纯观测不扰动被测流）：只读 hold 状态（holding/suspect/
+// heldUnitsSnapshot），不触碰 writer、定时器、inAdapter 与任何返回值——被保持的
+// 字节本就未写客户端，重放观测零副作用。截断流（EOF、无终态块）由 suspect()
+// 闩锁挡在桶外（client_gone 免费标签规则：截断 ≠ 完成的空）。
+func (ra *relayAttempt) emitTransformEmptyStreamUsageShadow(hold *emptyOutputHold, endReason stream.StreamEndReason) {
+	if hold == nil || !hold.holding() || !hold.suspect() {
+		return
+	}
+	units := hold.heldUnitsSnapshot()
+	// 重放 G4 观测链：可见性任一单元为真即豁免；usage 取最后在场的证据
+	// （与 wrapTransform 的终态决策同序）。
+	visible := false
+	var usage *model.Usage
+	for _, u := range units {
+		var obs chunkObservation
+		if u.eventPath {
+			obs = observeStreamEvents(u.events)
+		} else {
+			obs = observeStreamChunk(u.stream)
+		}
+		if obs.visible {
+			visible = true
+		}
+		if obs.usage != nil {
+			usage = obs.usage
+		}
+	}
+	switch evaluateEmptyStreamFailure(visible, usage) {
+	case emptyFailureFailure:
+		ra.logShadowEmptyRetry("usage_zero", ra.channelIDForLog(), endReason)
+	case emptyFailureUnknown:
+		// transform 路径的契约相对性：usage 缺失=unknown（不判 breach），与 G4
+		// 闸门语义一致（written decision：transform 面向多协议桥，维持 unknown
+		// 不触发；缺失形态单独计数，供 G5 实测桥的透传行为）。
+		ra.logShadowEmptyRetry("usage_absent", ra.channelIDForLog(), endReason)
+	}
+	// emptyFailureHealthy（usage 在场且 output>0）：与零可见矛盾时以 usage 为准，
+	// 豁免不记录（与 passthrough 路径的 emptyUsagePositive 同处置）。
 }
