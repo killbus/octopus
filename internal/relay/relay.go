@@ -489,7 +489,8 @@ func (ra *relayAttempt) attempt() attemptResult {
 	// 影子观测（G2）：chat-completions 流式出站由 ChatOutbound.TransformRequest
 	// 无条件注入 stream_options.include_usage=true（将 usage 合同升级为必填，空输出
 	// 判别器依赖该字段）。上游以 400 拒绝注入时在此归因——纯日志，零行为变更，
-	// 400 的重试/透传语义不变。
+	// 400 的重试/透传语义不变。upstream_error 是证据位（round-5 P2）：本行是
+	// 候选归因，成立与否由审计者对 body 摘要检验（400 可能另有原因）。
 	if statusCode == http.StatusBadRequest && ra.streamUsageOptionsInjected() {
 		log.Warnw("relay.include_usage_rejected",
 			"start_time_unix", ra.metrics.StartTime.Unix(),
@@ -498,6 +499,7 @@ func (ra *relayAttempt) attempt() attemptResult {
 			"channel_id", ra.channel.ID,
 			"channel", ra.channelNameForLog(),
 			"model", ra.requestModel,
+			"upstream_error", truncateUpstreamError(fwdErr.Error()),
 		)
 	}
 
@@ -1702,6 +1704,18 @@ func shadowProbeSampled(pct int, seed string) bool {
 		h *= 16777619
 	}
 	return int(h%100) < pct
+}
+
+// truncateUpstreamError 截取上游错误摘要用于日志证据位（round-5 P2：400 归因
+// 从「断言因果」升级为「检验因果」——审计者需 body 摘要来区分「上游真拒绝
+// include_usage」与「400 另有原因」）。按字节截断并兜底有效 UTF-8；300 字符
+// 足以覆盖 OpenAI/Anthropic 错误报文的 code+message 主体。
+func truncateUpstreamError(s string) string {
+	const max = 300
+	if len(s) <= max {
+		return s
+	}
+	return strings.ToValidUTF8(s[:max], "")
 }
 
 // logShadowEmptyRetry 记录影子判别命中（Infow 级，区别于告警——未改行为，非事故）。

@@ -1,6 +1,10 @@
 package relay
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 // G5 探针采样判定表测试：确定性（同种子同结论）、边界全拒/全收、分布合理。
 // 复算契约：种子 = "api_key_id|channel_id|start_time_unix|model"，四成分全部
@@ -41,5 +45,29 @@ func TestShadowProbeSampled(t *testing.T) {
 	ratio := float64(hits) / float64(n)
 	if ratio < 0.04 || ratio > 0.06 {
 		t.Fatalf("5%% sampling drifted: got %.2f%% (%d/%d)", ratio*100, hits, n)
+	}
+}
+
+// round-5 P2：400 归因日志的证据位截断表征——长 body 截到 300 字节、
+// 多字节 rune 边界兜底有效 UTF-8、短 body 原样。
+func TestTruncateUpstreamError(t *testing.T) {
+	long := strings.Repeat("x", 400)
+	got := truncateUpstreamError(long)
+	if len(got) != 300 {
+		t.Fatalf("long body must truncate to 300 bytes, got %d", len(got))
+	}
+
+	// 300 字节边界落在多字节 rune 中间：截断后必须仍是有效 UTF-8。
+	mixed := strings.Repeat("a", 299) + "中中中"
+	got = truncateUpstreamError(mixed)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated body must stay valid UTF-8, got %q", got)
+	}
+	if got != strings.Repeat("a", 299) {
+		t.Fatalf("partial rune must be dropped, got %q", got)
+	}
+
+	if got := truncateUpstreamError("short error"); got != "short error" {
+		t.Fatalf("short body must pass through, got %q", got)
 	}
 }
