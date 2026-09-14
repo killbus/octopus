@@ -103,4 +103,13 @@ type PassthroughConfig struct {
 	// Set to true for protocols that require full response aggregation for cost/token tracking
 	// (Anthropic), false for protocols with different metrics semantics (OpenAI Responses).
 	CollectMetrics bool
+
+	// VoidPrefixEvents lists the protocol's void-prefix meta events: events that carry
+	// no output semantics (envelope lifecycle only). The relay's empty-output hold
+	// (experimental, default OFF) buffers these until the first output event arrives,
+	// and the stream-end classifier treats them as non-evidence. Events not in any
+	// set are treated as output evidence.
+	// Examples: "response.created"/"response.in_progress" for OpenAI Responses,
+	// "message_start"/"ping" for Anthropic.
+	VoidPrefixEvents map[string]struct{}
 }
