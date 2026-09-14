@@ -279,14 +279,14 @@ func TestObserveEmptyStreamUsageForms(t *testing.T) {
 		want      emptyUsageVerdict
 	}{
 		{
-			name: "usage present and zero",
+			name:      "usage present and zero",
 			rawStream: created + `data: {"type":"response.completed","response":{"id":"r","status":"completed","usage":{"input_tokens":194495,"output_tokens":0,"total_tokens":194495}}}` + "\n\n",
-			want:  emptyUsageZero,
+			want:      emptyUsageZero,
 		},
 		{
-			name: "usage present and positive",
+			name:      "usage present and positive",
 			rawStream: created + `data: {"type":"response.completed","response":{"id":"r","status":"completed","usage":{"input_tokens":10,"output_tokens":9964,"total_tokens":9974,"output_tokens_details":{"reasoning_tokens":9964}}}}` + "\n\n",
-			want:  emptyUsagePositive,
+			want:      emptyUsagePositive,
 		},
 		{
 			name:      "usage missing entirely",

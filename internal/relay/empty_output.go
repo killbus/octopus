@@ -164,8 +164,8 @@ func isEmptyOutputResponse(resp *model.InternalLLMResponse) bool {
 
 // chunkObservation 对已解码上游 chunk 的保持策略分类结果。
 type chunkObservation struct {
-	visible  bool        // 携带客户端可见载荷（文本 / 工具调用）
-	terminal bool        // 携带 finish_reason（终态块）
+	visible  bool         // 携带客户端可见载荷（文本 / 工具调用）
+	terminal bool         // 携带 finish_reason（终态块）
 	usage    *model.Usage // 终态批内携带的 usage 证据（UsageDelta 事件 / 最终 chunk），可缺失
 }
 

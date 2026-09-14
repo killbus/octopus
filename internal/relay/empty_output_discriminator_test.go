@@ -64,15 +64,15 @@ func TestEvaluateEmptyStreamFailure(t *testing.T) {
 			expected: emptyFailureFailure,
 		},
 		{
-			name:    "visible_content_with_zero_usage_defensive_healthy",
-			visible: true,
-			usage:   &transformerModel.Usage{},
+			name:     "visible_content_with_zero_usage_defensive_healthy",
+			visible:  true,
+			usage:    &transformerModel.Usage{},
 			expected: emptyFailureHealthy,
 		},
 		{
-			name:    "visible_content_with_healthy_usage",
-			visible: true,
-			usage:   &transformerModel.Usage{PromptTokens: 1, CompletionTokens: 9},
+			name:     "visible_content_with_healthy_usage",
+			visible:  true,
+			usage:    &transformerModel.Usage{PromptTokens: 1, CompletionTokens: 9},
 			expected: emptyFailureHealthy,
 		},
 	}
