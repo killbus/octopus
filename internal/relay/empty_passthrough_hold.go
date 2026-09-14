@@ -42,7 +42,6 @@ type passthroughOutputHold struct {
 	pending   []byte       // 上一 chunk 的未完成 SSE 帧尾（与下一 chunk 合并解析）
 	heldBytes int          // 持有的原始 chunk 字节（buf+pending 总量，cap 依据）
 	holding   bool         // 是否仍在拦截（未 flush 放行）
-	capped    bool         // 超限闩锁：永久降级直通
 	// sawSuspect 闩锁（round-5 开灯前置①）：observe 在 Suspect 分支置位。post-Run
 	// G6 终判以 holding_() && sawSuspect 为闸——仅 Suspect 终态帧在场才判
 	// hold_failure 并补打影子行；void-prefix 后中途截断的流（EOF、无终态帧）不入
@@ -72,8 +71,11 @@ const (
 // 与半帧尾）随持有字节一次 flush——流顺序由原始字节序保证，且此后永久直通；
 // 全部帧 Keep/Suspect → 帧字节并入 buf 继续持有，半帧尾缓存在 pending。
 // cap 触发时 flush-degrade：持有字节 + 本 chunk 完整写出（绝不截断）。
+//
+// 单向收敛（Nottingham round-5）：本函数只做字节分帧（splitSSEFrames），事件
+// 语义（这个帧是什么事件、该 Keep 还是 Release）全部归 observe——见其注释。
 func (h *passthroughOutputHold) transform(data []byte, terminalEvents, errorEvents map[string]struct{}) ([]byte, error) {
-	if !h.holding || h.capped {
+	if !h.holding {
 		return data, nil // 已直通
 	}
 
@@ -82,18 +84,8 @@ func (h *passthroughOutputHold) transform(data []byte, terminalEvents, errorEven
 	h.pending = nil
 
 	sawRelease := false
-	rest := combined
-	for len(rest) > 0 {
-		var frame []byte
-		if idx := bytes.Index(rest, []byte("\n\n")); idx >= 0 {
-			frame = rest[:idx+2]
-			rest = rest[idx+2:]
-		} else if idx := bytes.Index(rest, []byte("\r\n\r\n")); idx >= 0 {
-			frame = rest[:idx+4]
-			rest = rest[idx+4:]
-		} else {
-			break // 半帧尾
-		}
+	frames, rest := splitSSEFrames(combined)
+	for _, frame := range frames {
 		if h.observe(sseFrameEventType(frame), frame, terminalEvents, errorEvents) == passthroughHoldRelease {
 			sawRelease = true
 		}
@@ -107,15 +99,36 @@ func (h *passthroughOutputHold) transform(data []byte, terminalEvents, errorEven
 	}
 
 	// Keep/Suspect：完整帧字节并入 buf，继续持有；半帧尾等下个 chunk。
-	frames := combined[:len(combined)-len(rest)]
-	if len(frames) > 0 {
-		if !h.hold(frames) {
+	framesBytes := combined[:len(combined)-len(rest)]
+	if len(framesBytes) > 0 {
+		if !h.hold(framesBytes) {
 			// 8 MiB 超限：flush-degrade 直通（不截断）
 			return h.flushAllBytes(combined), nil
 		}
 	}
 	h.pending = append(h.pending, rest...)
 	return nil, nil
+}
+
+// splitSSEFrames 纯字节分帧：按 SSE 帧边界（"\n\n" 或 "\r\n\r\n"）切出完整帧，
+// 返回完整帧列表与半帧尾。不含事件语义——对帧内容零解释（单向收敛：字节分帧与
+// 事件语义分家，语义归 observe）。
+func splitSSEFrames(data []byte) (frames [][]byte, rest []byte) {
+	rest = data
+	for len(rest) > 0 {
+		var frame []byte
+		if idx := bytes.Index(rest, []byte("\n\n")); idx >= 0 {
+			frame = rest[:idx+2]
+			rest = rest[idx+2:]
+		} else if idx := bytes.Index(rest, []byte("\r\n\r\n")); idx >= 0 {
+			frame = rest[:idx+4]
+			rest = rest[idx+4:]
+		} else {
+			return frames, rest // 半帧尾
+		}
+		frames = append(frames, frame)
+	}
+	return frames, nil
 }
 
 // sseEventDataPayload 从单个 SSE 帧提取 data 载荷（多行 data 按协议拼接）。
@@ -163,10 +176,13 @@ func observeChunkPayload(data []byte) []byte {
 	return nil
 }
 
-// observe 决策单个已解析 chunk。event 为空 / 不可解析时保守放行（flush-degrade，
-// 与分类器的「不猜测」一致——保持中收到的任何含糊输入都不该演变成静默截断）。
+// observe 决策单个已解析 chunk,是事件语义的唯一所有者(单向收敛,Nottingham
+// round-5):错误事件 / 终态 / void-prefix / 输出证据的分类判定全部在此,transform
+// 只喂帧不做解释。event 为空 / 不可解析时保守放行(flush-degrade,与分类器的
+// 「不猜测」一致——保持中收到的任何含糊输入都不该演变成静默截断)。批次二将按
+// SSE 规范把注释帧(无事件语义)从「不可解析」中分出为 Keep;本函数是唯一翻转点。
 func (h *passthroughOutputHold) observe(typ string, data []byte, terminalEvents, errorEvents map[string]struct{}) passthroughHoldAction {
-	if !h.holding || h.capped {
+	if !h.holding {
 		return passthroughHoldRelease
 	}
 	payload := observeChunkPayload(data)

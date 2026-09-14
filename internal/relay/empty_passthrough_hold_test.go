@@ -520,3 +520,78 @@ func TestPassthroughHoldUntypedChunkConservativeRelease(t *testing.T) {
 		t.Fatalf("typed void-prefix must keep, got %d", got)
 	}
 }
+
+// splitSSEFrames 纯字节分帧的单元表征(单向收敛):\n\n 与 \r\n\r\n 混合边界、
+// 多帧单 chunk、半帧尾——无语义解释,锁定后供批次二统一。
+func TestSplitSSEFramesByteFraming(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		wantN     int
+		wantRest  string
+		wantFirst string
+	}{
+		{
+			name:      "single frame",
+			input:     "data: {}\n\n",
+			wantN:     1,
+			wantRest:  "",
+			wantFirst: "data: {}\n\n",
+		},
+		{
+			name:     "two frames one chunk",
+			input:    "data: {a}\n\ndata: {b}\n\n",
+			wantN:    2,
+			wantRest: "",
+		},
+		{
+			name:      "partial tail frame",
+			input:     "data: {a}\n\ndata: {b",
+			wantN:     1,
+			wantRest:  "data: {b",
+			wantFirst: "data: {a}\n\n",
+		},
+		{
+			name:      "crlf boundary",
+			input:     "data: {a}\r\n\r\n",
+			wantN:     1,
+			wantRest:  "",
+			wantFirst: "data: {a}\r\n\r\n",
+		},
+		{
+			name:     "mixed boundaries",
+			input:    "data: {a}\n\ndata: {b}\r\n\r\n",
+			wantN:    2,
+			wantRest: "",
+		},
+		{
+			name:     "only partial frame",
+			input:    "data: {a",
+			wantN:    0,
+			wantRest: "data: {a",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			frames, rest := splitSSEFrames([]byte(tc.input))
+			if len(frames) != tc.wantN {
+				t.Fatalf("got %d frames, want %d (frames: %q)", len(frames), tc.wantN, frames)
+			}
+			if string(rest) != tc.wantRest {
+				t.Fatalf("rest = %q, want %q", rest, tc.wantRest)
+			}
+			if tc.wantFirst != "" && (len(frames) == 0 || string(frames[0]) != tc.wantFirst) {
+				t.Fatalf("first frame = %q, want %q", frames, tc.wantFirst)
+			}
+			// 字节序不变性:帧 + 尾拼接必须还原输入(无字节丢失/重排)。
+			var rebuilt []byte
+			for _, f := range frames {
+				rebuilt = append(rebuilt, f...)
+			}
+			rebuilt = append(rebuilt, rest...)
+			if string(rebuilt) != tc.input {
+				t.Fatalf("round-trip mismatch: got %q, want %q", rebuilt, tc.input)
+			}
+		})
+	}
+}
