@@ -1294,13 +1294,26 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 	// Buffer for raw stream (for metrics collection)
 	var rawStreamBuf bytes.Buffer
 
+	// G6 实验开关：passthrough hold-until-output-evidence（默认 OFF）。
+	var ptHold *passthroughOutputHold
+	var ptTransform stream.StreamTransform
+	if emptyPassthroughHoldEnabled() {
+		ptHold = newPassthroughOutputHold()
+		ptTransform = func(_ context.Context, data []byte) ([]byte, error) {
+			// RawSource 的 chunk 是 SSE 帧序列（"data: {...}\n\n"），不是单个 JSON；
+			// 帧解析与逐帧决策封装在 hold 内（跨 chunk 半帧尾由 pending 缓冲，
+			// flush-degrade 与保守放行契约见 passthroughOutputHold 注释）。
+			return ptHold.transform(data, cfg.TerminalEvents, cfg.ErrorEvents)
+		}
+	}
+
 	// Create StreamProcessor. Declared as a variable first so the OnFinish
 	// closure below can query EndReason() for the stream_end_reason log field
 	// (finalize assigns the reason before invoking OnFinish).
 	var processor *stream.StreamProcessor
 	processor = stream.NewStreamProcessor(stream.StreamConfig{
 		Source:            stream.NewRawSource(response.Body, 32*1024),
-		Transform:         nil, // Passthrough: no transformation
+		Transform:         ptTransform, // nil = pure passthrough (G6 off)
 		Writer:            ra.getStreamWriter(),
 		Context:           ctx,
 		FirstTokenTimeout: firstTokenTimeout,
@@ -1391,6 +1404,26 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 		if timeoutErr := ra.firstTokenTimeoutIfNeeded(ctx, err); timeoutErr != nil {
 			return timeoutErr
 		}
+	}
+
+	// G6 终判：ErrEmptyUpstreamStream（finalize 零写入路径，OnFinish 未被调用）
+	// 且全程保持中（零输出事件零放行）→ 缺陷证据成立。客户端零字节（held 未写），
+	// statusCode=0 走既有同通道重试链（fresh clean stream，无 dual created）。
+	// 契约内缺失=breach（Responses completed 原生强制 usage），与 G4 transform
+	// 路径的差分为 written decision（见 passthroughOutputHold 注释）。
+	if err != nil && errors.Is(err, stream.ErrEmptyUpstreamStream) && ptHold != nil && ptHold.holding_() {
+		var channelID int
+		if ra.channel != nil {
+			channelID = ra.channel.ID
+		}
+		log.Warnw("relay.empty_stream_hold_failure",
+			"api_key_id", ra.apiKeyID,
+			"group_id", ra.groupID,
+			"channel_id", channelID,
+			"channel", ra.channelNameForLog(),
+			"model", ra.requestModel,
+		)
+		return err
 	}
 
 	// On disconnect with partial data, still try to collect metrics

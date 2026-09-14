@@ -48,6 +48,7 @@ const (
 	SettingKeyWebDAVBackupInterval             SettingKey = "webdav_backup_interval"                // WebDAV 自动备份间隔(小时)，0=禁用
 	SettingKeyWebDAVRetentionCount             SettingKey = "webdav_retention_count"                // WebDAV 保留备份份数
 	SettingKeyWebDAVIncludeStats               SettingKey = "webdav_include_stats"                  // WebDAV 备份是否包含统计数据
+	SettingKeyEmptyPassthroughHoldEnabled      SettingKey = "empty_passthrough_hold_enabled"        // G6 实验：passthrough hold-until-output-evidence（默认关闭）
 )
 
 type Setting struct {
@@ -96,6 +97,7 @@ func DefaultSettings() []Setting {
 		{Key: SettingKeyWebDAVBackupInterval, Value: "0"},       // 默认禁用自动备份
 		{Key: SettingKeyWebDAVRetentionCount, Value: "10"},      // 默认保留10份
 		{Key: SettingKeyWebDAVIncludeStats, Value: "true"},      // 默认包含统计数据
+		{Key: SettingKeyEmptyPassthroughHoldEnabled, Value: "false"}, // G6 实验开关默认关闭
 	}
 }
 
