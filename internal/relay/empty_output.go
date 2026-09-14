@@ -427,8 +427,16 @@ func (h *emptyOutputHold) wrapTransform(ra *relayAttempt) stream.StreamTransform
 				// （CompletionTokens==0，#155 记账自证形态）→ 不 flush，保持到流尾，
 				// finalize 判 ErrEmptyUpstreamStream 走既有重试链。usage 健康 / 缺失
 				// （#40200 合法空轮 / 桥剥离）→ 现状 flush（保守放行）。
+				// deferral（round-5 P2）：这里刻意不消费「重试由谁发起」的裁决——
+				// 闸门只做证据收集（sawSuspect 闩锁），written decision 留给流尾
+				// 终判（见 passthroughOutputHold 注释的差分说明）。
+				// split-chunk 行为边界：obs 只描述当前 chunk。上游把 delta 与终态
+				// 拆到不同 chunk 时，两 chunk 各自独立过本分支（delta chunk 无终态
+				// → 保持；终态 chunk 零可见 + usage 指证 → 保持）——路径都收敛到
+				// 流尾终判，无静默截断；半帧尾 decode 失败 → drop 可重试，同样
+				// 大声失败。
 				if obs.terminal && !obs.visible &&
-					evaluateEmptyStreamFailure(false, obs.usage) == emptyFailureFailure {
+					evaluateEmptyStreamFailure(obs.visible, obs.usage) == emptyFailureFailure {
 					h.sawSuspect = true // 闩锁（round-5 前置①）：Suspect 终态在场
 					if h.hold(unit, len(data)) {
 						return nil, nil // 缺陷证据成立：终态块一并保持，流尾空判定
