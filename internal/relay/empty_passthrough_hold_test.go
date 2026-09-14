@@ -189,7 +189,7 @@ func TestPassthroughHoldObserveMatrix(t *testing.T) {
 }
 
 // responsesTestConfig 构造与 openai.ResponseOutbound 等价的 Responses 分类法
-//（测试不依赖适配器注册表时使用）。
+// （测试不依赖适配器注册表时使用）。
 func responsesTestConfig() transformerModel.PassthroughConfig {
 	return transformerModel.PassthroughConfig{
 		TerminalEvents: map[string]struct{}{

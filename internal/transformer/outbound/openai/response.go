@@ -1933,7 +1933,7 @@ var responsesPassthroughErrorEvents = map[string]struct{}{
 // responsesPassthroughVoidPrefixEvents 列出 OpenAI Responses SSE 流中无输出语义的
 // void-prefix 元事件（信封生命周期事件，非生成证据）。
 var responsesPassthroughVoidPrefixEvents = map[string]struct{}{
-	"response.created":    {},
+	"response.created":     {},
 	"response.in_progress": {},
 }
 

@@ -2045,7 +2045,7 @@ var anthropicPassthroughErrorEvents = map[string]struct{}{
 // anthropicPassthroughVoidPrefixEvents 列出 Anthropic Messages SSE 流中无输出语义的
 // void-prefix 元事件。message_start 只声明信封与 role；ping 是保活注释级事件——
 // 两者都不构成生成证据。message_delta 携带累积 usage 与 stop_reason，不计入此集
-//（终态伴随块，判据走 TerminalEvents + usage 提取）。
+// （终态伴随块，判据走 TerminalEvents + usage 提取）。
 var anthropicPassthroughVoidPrefixEvents = map[string]struct{}{
 	"message_start": {},
 	"ping":          {},
