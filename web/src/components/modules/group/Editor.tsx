@@ -29,6 +29,7 @@ export type GroupEditorValues = {
     session_keep_time: number;
     retry_enabled: boolean;
     max_retries: number;
+    empty_retry_enabled: boolean;
     members: SelectedMember[];
 };
 
@@ -277,6 +278,7 @@ export function GroupEditor({
     const [sessionKeepTime, setSessionKeepTime] = useState<number>(initial?.session_keep_time ?? 0);
     const [retryEnabled, setRetryEnabled] = useState<boolean>(initial?.retry_enabled ?? false);
     const [maxRetries, setMaxRetries] = useState<number>(initial?.max_retries ?? 3);
+    const [emptyRetryEnabled, setEmptyRetryEnabled] = useState<boolean>(initial?.empty_retry_enabled ?? false);
     const [selectedMembers, setSelectedMembers] = useState<SelectedMember[]>(initial?.members ?? []);
     const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
 
@@ -362,6 +364,7 @@ export function GroupEditor({
             session_keep_time: sessionKeepTime,
             retry_enabled: retryEnabled,
             max_retries: maxRetries,
+            empty_retry_enabled: emptyRetryEnabled,
             members: selectedMembers,
         });
     };
@@ -496,6 +499,22 @@ export function GroupEditor({
                                 </TooltipTrigger>
                                 <TooltipContent>
                                     {t('form.retryEnabledHint')}
+                                </TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <label className="flex items-center gap-1.5 shrink-0 cursor-pointer">
+                                        <Switch
+                                            checked={emptyRetryEnabled}
+                                            onCheckedChange={setEmptyRetryEnabled}
+                                        />
+                                        <span className="text-xs text-muted-foreground">{t('form.emptyRetryEnabled')}</span>
+                                    </label>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    {t('form.emptyRetryEnabledHint')}
                                 </TooltipContent>
                             </Tooltip>
                         </TooltipProvider>

@@ -111,6 +111,10 @@ func GroupUpdate(req *model.GroupUpdateRequest, ctx context.Context) (*model.Gro
 		selectFields = append(selectFields, "retry_enabled")
 		updates.RetryEnabled = *req.RetryEnabled
 	}
+	if req.EmptyRetryEnabled != nil {
+		selectFields = append(selectFields, "empty_retry_enabled")
+		updates.EmptyRetryEnabled = *req.EmptyRetryEnabled
+	}
 	if req.MaxRetries != nil {
 		v := *req.MaxRetries
 		if v <= 0 {

@@ -596,6 +596,8 @@
             "retryEnabledHint": "When enabled, retries on the same channel for 429/5xx errors before passing through the status code to the client",
             "maxRetries": "Max Retries",
             "maxRetriesHint": "Same-channel retry count, only effective when same-channel retry is enabled",
+            "emptyRetryEnabled": "Treat Empty Output as Error",
+            "emptyRetryEnabledHint": "When enabled, a 200 empty output (reasoning only, no visible content) marks the channel failed and feeds circuit breaking/failover instead of returning an empty 200 to the client; when same-channel retry is on, it shares the retry budget with ordinary errors (for reasoning models)",
             "items": "Selected Models",
             "addItem": "Add Model",
             "autoAdd": "Auto Add",
