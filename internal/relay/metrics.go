@@ -40,6 +40,10 @@ type RelayMetrics struct {
 	BillInputTokens      *int
 	CacheReadTokens      *int
 	CacheWriteTokens     *int
+
+	// streamEndReason 记录最后一次流式 attempt 的流结束原因
+	//（stream.StreamEndReason，G3）；非流式请求留空，日志行省略该字段。
+	streamEndReason string
 }
 
 func NewRelayMetrics(apiKeyID int, requestModel string, rawBody []byte, req *transformerModel.InternalLLMRequest) *RelayMetrics {
@@ -83,6 +87,15 @@ func (m *RelayMetrics) SetWSRecovery(recovery model.RelayLogWSRecovery) {
 		return
 	}
 	m.WSRecovery = wsRecoveryPtr(recovery)
+}
+
+// SetStreamEndReason 记录流结束原因（最后一次流式 attempt 覆盖先前）。
+// 仅进日志行，不进 RelayLog schema。
+func (m *RelayMetrics) SetStreamEndReason(reason string) {
+	if reason == "" {
+		return
+	}
+	m.streamEndReason = reason
 }
 
 func (m *RelayMetrics) SetInternalResponse(resp *transformerModel.InternalLLMResponse, actualModel string) {
@@ -190,6 +203,9 @@ func (m *RelayMetrics) SaveWithChannelStats(ctx context.Context, success bool, e
 			"total_cost", m.Stats.InputCost + m.Stats.OutputCost,
 			"attempts", len(attempts),
 			"ws", m.UsedWS,
+		}
+		if m.streamEndReason != "" {
+			fields = append(fields, "stream_end_reason", m.streamEndReason)
 		}
 		if success {
 			log.Infow("relay.complete", fields...)

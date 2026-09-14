@@ -13,6 +13,7 @@ import (
 	"github.com/bestruirui/octopus/internal/conf"
 	dbmodel "github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/relay/balancer"
+	"github.com/bestruirui/octopus/internal/relay/stream"
 	"github.com/bestruirui/octopus/internal/transformer/model"
 	"github.com/gin-gonic/gin"
 )
@@ -133,6 +134,16 @@ type relayAttempt struct {
 	// baseURLKey 是 canonicalBaseURL 的 sha256 指纹，用于 WS 池键与 affinity 持久化。
 	baseURL    string
 	baseURLKey string
+}
+
+// recordStreamEndReason 在 processor.Run 返回后调用：将流结束原因写入
+// RelayMetrics（请求级，最后一次 attempt 覆盖先前），供 relay.complete /
+// relay.empty_stream 日志行携带。仅观测，无行为分支。
+func (ra *relayAttempt) recordStreamEndReason(reason stream.StreamEndReason) {
+	if ra == nil || ra.metrics == nil || reason == "" {
+		return
+	}
+	ra.metrics.SetStreamEndReason(string(reason))
 }
 
 // effectiveBaseURL 返回本次 attempt 的实际上游端点。

@@ -874,6 +874,9 @@ func (ra *relayAttempt) handleWSStreamResponseV2(ctx context.Context, reader *ws
 		ra.streamPayloadWritten.Store(true)
 	}
 
+	// 流结束原因：进 RelayMetrics，relay.complete / empty_stream 行携带（G3）。
+	ra.recordStreamEndReason(processor.EndReason())
+
 	// 断连残余观测（同 handleStreamResponseV2）。
 	if hold.holding() && hold.heldBytes() > 0 {
 		log.Debugf("empty-output hold discarded %d buffered bytes on ws stream end (written=%t)",
@@ -1242,6 +1245,9 @@ func (ra *relayAttempt) handleStreamResponseV2(ctx context.Context, response *ht
 		ra.streamPayloadWritten.Store(true)
 	}
 
+	// 流结束原因：进 RelayMetrics，relay.complete / empty_stream 行携带（G3）。
+	ra.recordStreamEndReason(processor.EndReason())
+
 	// 断连残余观测：保持中的字节未写客户端（Written=false → 可重试），
 	// Run 返回后记录残余规模即可（Kleppmann 裁定：无需 cancel 分支守卫）。
 	if hold.holding() && hold.heldBytes() > 0 {
@@ -1288,8 +1294,11 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 	// Buffer for raw stream (for metrics collection)
 	var rawStreamBuf bytes.Buffer
 
-	// Create StreamProcessor
-	processor := stream.NewStreamProcessor(stream.StreamConfig{
+	// Create StreamProcessor. Declared as a variable first so the OnFinish
+	// closure below can query EndReason() for the stream_end_reason log field
+	// (finalize assigns the reason before invoking OnFinish).
+	var processor *stream.StreamProcessor
+	processor = stream.NewStreamProcessor(stream.StreamConfig{
 		Source:            stream.NewRawSource(response.Body, 32*1024),
 		Transform:         nil, // Passthrough: no transformation
 		Writer:            ra.getStreamWriter(),
@@ -1321,6 +1330,7 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 				}
 				log.Warnw("relay.empty_stream",
 					"empty_stream_kind", logKind,
+					"stream_end_reason", string(processor.EndReason()),
 					"api_key_id", ra.apiKeyID,
 					"group_id", ra.groupID,
 					"channel_id", channelID,
@@ -1335,9 +1345,9 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 			if kind == passthroughStreamTerminal && !hasOutputEvent {
 				switch observeEmptyStreamUsage(rawStream) {
 				case emptyUsageZero:
-					ra.logShadowEmptyRetry("usage_zero", channelID)
+					ra.logShadowEmptyRetry("usage_zero", channelID, processor.EndReason())
 				case emptyUsageAbsent:
-					ra.logShadowEmptyRetry("usage_absent", channelID)
+					ra.logShadowEmptyRetry("usage_absent", channelID, processor.EndReason())
 				}
 			}
 			if len(rawStream) == 0 {
@@ -1366,6 +1376,9 @@ func (ra *relayAttempt) handleStreamResponsePassthroughV2(ctx context.Context, r
 	if processor.PayloadWritten() {
 		ra.streamPayloadWritten.Store(true)
 	}
+
+	// 流结束原因：进 RelayMetrics，relay.complete / empty_stream 行携带（G3）。
+	ra.recordStreamEndReason(processor.EndReason())
 
 	// Handle first token timeout specifically
 	if err != nil && strings.Contains(err.Error(), "first token timeout") {
@@ -1650,9 +1663,10 @@ func isPassthroughEmptyStreamKind(kind string) bool {
 // logShadowEmptyRetry 记录影子判别命中（Infow 级，区别于告警——未改行为，非事故）。
 // relay.empty_stream_shadow 形态字段：usage_zero（usage 在场且 output==0，判别式
 // 触发形态）/ usage_absent（usage 缺失，NULL≠0，不触发，待实测桥的透传行为）。
-func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int) {
+func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int, endReason stream.StreamEndReason) {
 	log.Infow("relay.empty_stream_shadow",
 		"usage_form", usageForm,
+		"stream_end_reason", string(endReason),
 		"api_key_id", ra.apiKeyID,
 		"group_id", ra.groupID,
 		"channel_id", channelID,

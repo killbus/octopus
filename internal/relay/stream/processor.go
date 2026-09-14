@@ -20,6 +20,35 @@ import (
 // Relay should fail over to another channel.
 var ErrEmptyUpstreamStream = errors.New("upstream stream ended without forwarding any payload")
 
+// StreamEndReason records why a stream processing loop ended. The stream-close
+// moment is the most informative observation point: "ended normally but empty"
+// and "stream truncated mid-flight" demand different downstream semantics
+// (retry vs. attribution), so relay-layer rulings must not treat them alike.
+// Run() assigns the reason on every exit path; query via EndReason() after
+// Run returns.
+type StreamEndReason string
+
+const (
+	// StreamEndReasonDone: normal EOF with payload forwarded (success).
+	StreamEndReasonDone StreamEndReason = "done"
+	// StreamEndReasonEmpty: normal EOF but nothing was forwarded
+	// (ErrEmptyUpstreamStream path).
+	StreamEndReasonEmpty StreamEndReason = "empty"
+	// StreamEndReasonClientGone: request context canceled (client disconnect)
+	// without a terminal event in the buffered stream.
+	StreamEndReasonClientGone StreamEndReason = "client_gone"
+	// StreamEndReasonFirstTokenTimeout: first token timeout fired.
+	StreamEndReasonFirstTokenTimeout StreamEndReason = "first_token_timeout"
+	// StreamEndReasonReadError: source read failed (non-EOF).
+	StreamEndReasonReadError StreamEndReason = "read_error"
+	// StreamEndReasonTransformError: transform callback returned an error.
+	StreamEndReasonTransformError StreamEndReason = "transform_error"
+	// StreamEndReasonWriteError: client write failed.
+	StreamEndReasonWriteError StreamEndReason = "write_error"
+	// StreamEndReasonHeartbeatError: heartbeat write failed.
+	StreamEndReasonHeartbeatError StreamEndReason = "heartbeat_error"
+)
+
 // StreamSource abstracts different event sources (SSE, WebSocket, raw bytes).
 type StreamSource interface {
 	// ReadEvent blocks until the next event is available or returns an error.
@@ -74,6 +103,7 @@ type StreamProcessor struct {
 	rawBuffer      bytes.Buffer
 	payloadWritten bool
 	firstToken     bool
+	endReason      StreamEndReason
 }
 
 // NewStreamProcessor creates a processor from config.
@@ -151,6 +181,7 @@ func (p *StreamProcessor) Run() error {
 
 		case <-heartbeatC:
 			if err := p.writeHeartbeat(); err != nil {
+				p.endReason = StreamEndReasonHeartbeatError
 				return err
 			}
 
@@ -164,6 +195,7 @@ func (p *StreamProcessor) Run() error {
 				if r.err == io.EOF {
 					return p.finalize()
 				}
+				p.endReason = StreamEndReasonReadError
 				return fmt.Errorf("stream read error: %w", r.err)
 			}
 
@@ -227,6 +259,7 @@ func (p *StreamProcessor) processEvent(data []byte) (held bool, err error) {
 	if p.config.Transform != nil {
 		output, err = p.config.Transform(p.config.Context, data)
 		if err != nil {
+			p.endReason = StreamEndReasonTransformError
 			return false, fmt.Errorf("transform error: %w", err)
 		}
 		if len(output) == 0 {
@@ -242,6 +275,7 @@ func (p *StreamProcessor) processEvent(data []byte) (held bool, err error) {
 	}
 
 	if _, err := p.config.Writer.Write(output); err != nil {
+		p.endReason = StreamEndReasonWriteError
 		return false, fmt.Errorf("write error: %w", err)
 	}
 
@@ -261,6 +295,11 @@ func (p *StreamProcessor) writeHeartbeat() error {
 
 // handleDisconnect handles context cancellation or timeout.
 func (p *StreamProcessor) handleDisconnect() error {
+	// Default reason for a disconnect; overwritten below when the buffered
+	// stream had already reached a terminal event (that finalize() run then
+	// records done/empty, which is the truer description of the upstream side).
+	p.endReason = StreamEndReasonClientGone
+
 	// Check for terminal events in buffered stream
 	if p.config.BufferRawStream && len(p.config.TerminalEvents) > 0 {
 		if p.streamReachedTerminal() {
@@ -285,6 +324,7 @@ func (p *StreamProcessor) handleDisconnect() error {
 
 // handleFirstTokenTimeout returns first token timeout error.
 func (p *StreamProcessor) handleFirstTokenTimeout() error {
+	p.endReason = StreamEndReasonFirstTokenTimeout
 	log.Warnf("first token timeout (%v), switching channel", p.config.FirstTokenTimeout)
 	return fmt.Errorf("first token timeout after %v", p.config.FirstTokenTimeout)
 }
@@ -292,8 +332,11 @@ func (p *StreamProcessor) handleFirstTokenTimeout() error {
 // finalize completes the stream and calls OnFinish callback.
 func (p *StreamProcessor) finalize() error {
 	if !p.payloadWritten {
+		p.endReason = StreamEndReasonEmpty
 		return ErrEmptyUpstreamStream
 	}
+
+	p.endReason = StreamEndReasonDone
 
 	log.Debugf("stream end (payload_written=%t)", p.payloadWritten)
 
@@ -310,6 +353,13 @@ func (p *StreamProcessor) finalize() error {
 // PayloadWritten returns whether any payload has been written to the client.
 func (p *StreamProcessor) PayloadWritten() bool {
 	return p.payloadWritten
+}
+
+// EndReason returns why the processing loop ended. Empty string until Run
+// reaches an exit path; query after Run returns. OnFinish callbacks see the
+// reason already assigned (finalize assigns before invoking OnFinish).
+func (p *StreamProcessor) EndReason() StreamEndReason {
+	return p.endReason
 }
 
 // streamReachedTerminal checks if buffered stream contains a terminal event.

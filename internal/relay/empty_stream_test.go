@@ -229,6 +229,11 @@ func TestPassthroughShellStreamTerminalNoOutputIsLoggedButRecordedSuccess(t *tes
 	if fields["empty_stream_kind"] != "terminal_no_output" {
 		t.Fatalf("expected empty_stream_kind=terminal_no_output, got %q (fields: %v)", fields["empty_stream_kind"], fields)
 	}
+	// G3: stream_end_reason 携带流结束方式——正常 EOF（finalize 先赋值再调
+	// OnFinish，闭包内可见）。
+	if fields["stream_end_reason"] != "done" {
+		t.Fatalf("expected stream_end_reason=done, got %q (fields: %v)", fields["stream_end_reason"], fields)
+	}
 	if fields["model"] != "gpt-4o" {
 		t.Fatalf("expected model field gpt-4o (requestModel from test helper), got %q", fields["model"])
 	}
