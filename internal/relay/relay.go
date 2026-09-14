@@ -1744,18 +1744,19 @@ func (ra *relayAttempt) logShadowEmptyRetry(usageForm string, channelID int, end
 	log.Infow("relay.empty_stream_shadow", fields...)
 }
 
-// streamUsageOptionsInjected 报告本次 attempt 的上游请求是否被注入了
+// streamUsageOptionsInjected 报告本次 attempt 的上游请求是否携带了
 // stream_options.include_usage=true。注入发生在 ChatOutbound.TransformRequest 内部
-// （chat-completions 流式出站，WS 与 HTTP 共用 attempt 链路），relay 层以协议形状
-// 等价判断：chat 出站 + 内部请求为流式。仅服务影子观测（400 归因）。
+// （chat-completions 流式出站，WS 与 HTTP 共用 attempt 链路）：TransformRequest
+// 原地修改 internalRequest，注入的持久效果即 StreamOptions.IncludeUsage==true。
+// relay 层查询该效果而非重新推导注入条件——单一真理（round-5 P2：平行真理
+// 两处知识一处漂移两处错）。附带收窄 400 归因：客户端未带、注入也未发生的
+// 400 不再打归因日志；无论 include_usage 由注入还是客户端加上，被上游拒绝
+// 的归因都成立。仅服务影子观测。
 func (ra *relayAttempt) streamUsageOptionsInjected() bool {
-	if ra == nil || ra.outAdapter == nil || ra.internalRequest == nil {
+	if ra == nil || ra.internalRequest == nil {
 		return false
 	}
-	if _, ok := ra.outAdapter.(*openaiOutbound.ChatOutbound); !ok {
-		return false
-	}
-	return ra.internalRequest.Stream != nil && *ra.internalRequest.Stream
+	return ra.internalRequest.StreamOptions != nil && ra.internalRequest.StreamOptions.IncludeUsage
 }
 
 // emitEmptyStreamFamily 是空流缺陷族观测的共享终态器（Nottingham round-5 裁定：
