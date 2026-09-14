@@ -226,3 +226,32 @@ absent rulings may only cite shadow rows from G6-OFF (or G6-less) channels.
   level vs usage level).
 - Existing constraints (force-push to origin, web build, gemini WIP) are
   unchanged.
+
+## Appendix: lights-off drill (window zero)
+
+演练目的：验证 G6 开关全生命周期可由**非修复者**操作，演练通过后由运维宣布
+窗口起点。此前积累的影子数据一律按垃圾时间排除，不得进入裁决。
+
+**前置锁定（代码级，已入测试）**
+
+1. 开关动态生效：`TestPassthroughHoldSwitchTakesEffectWithoutRestart`
+   （不重启翻 ON 拦截、翻 OFF 恢复直通）。
+2. 拼错布尔值大声拒绝：`TestSettingBooleanValidation`
+   （API 层 400,报文含 true or false）。
+3. 在飞流不受中途翻转影响：`TestPassthroughHoldInFlightStreamUnaffectedByMidStreamFlip`
+   （建立点每流恰读一次,首读 ON 后中途翻 OFF 不放行）。
+
+**演练步骤（生产/预发,按序,全部通过才宣布窗口起点）**
+
+1. 翻开关不重启:`POST /api/settings` 把
+   `empty_passthrough_hold_enabled` 置 `true`,预期 200,服务不重启。
+2. 拼错值大声拒绝:同一接口把值改为 `"1"`,预期 400,报文含
+   `true or false`。
+3. 影子随开关停止:置 `false` 后,`relay.empty_stream_shadow` 日志停止新增
+   （在飞流收尾后）。
+4. 日志关联键:在日志面板用 `start_time_unix` 关联 RelayLog 明细,确认能
+   命中同流记录（键值 = RelayLog `Time` 字段秒值）。
+5. 翻回:确认 `empty_passthrough_hold_enabled` 恢复 `false`。
+
+**执行人**：非修复者。演练结果(五步各 PASS/FAIL)回贴到 graduation
+dashboard 的窗口零条目，作为宣布窗口起点的依据。
